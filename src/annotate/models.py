@@ -9,10 +9,23 @@ of the reviewed repo's JSONL ledger.
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+
+def _public_id(raw: Any) -> str:
+    """h's public annotation id: url-safe base64 of the uuid bytes, no padding.
+
+    The DB stores ``id`` as a Postgres ``uuid``; the h API addresses annotations by
+    this flattened form (e.g. ``PATCH /api/annotations/<public-id>``), so reads must
+    surface it — otherwise write-back calls (``resolve``) 404 with the raw uuid.
+    """
+    u = raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
+    return base64.urlsafe_b64encode(u.bytes).rstrip(b"=").decode()
 
 
 @dataclass(frozen=True)
@@ -36,11 +49,11 @@ class Annotation:
         h stores the page URL in ``target_uri`` and the selectors in
         ``target_selectors`` (the bare selector list); we reassemble the API
         ``target`` shape ``[{"source", "selector"}]`` the rest of the tool consumes.
-        ``id`` is a Postgres ``uuid``; stringify it so the annotation stays
-        JSON-serializable (the ledger dumps it without a ``uuid`` encoder).
+        ``id`` is the Postgres ``uuid`` flattened to h's public id, so it matches the
+        API and is JSON-serializable (the ledger dumps without a ``uuid`` encoder).
         """
         return cls(
-            id=str(row["id"]),
+            id=_public_id(row["id"]),
             created=row["created"],
             userid=row["userid"],
             group=row["groupid"],

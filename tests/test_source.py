@@ -25,8 +25,9 @@ from annotate.config import Config
 from annotate.source import PostgresSource
 
 
-def _seed(cfg: Config, uri: str, text: str, tags: list[str], selectors: Any = None) -> None:
-    """Create one annotation via the real h API (as the extension does)."""
+def _seed(cfg: Config, uri: str, text: str, tags: list[str], selectors: Any = None) -> str:
+    """Create one annotation via the real h API (as the extension does); return the
+    h public (API) id the server assigned — the id downstream API calls must use."""
     payload: dict[str, Any] = {"uri": uri, "text": text, "tags": tags, "group": cfg.group_id}
     if selectors is not None:
         payload["target"] = [{"source": uri, "selector": selectors}]
@@ -36,6 +37,7 @@ def _seed(cfg: Config, uri: str, text: str, tags: list[str], selectors: Any = No
         json=payload,
     )
     resp.raise_for_status()
+    return resp.json()["id"]
 
 
 @pytest.fixture
@@ -46,9 +48,9 @@ def seeded() -> Any:
     tag = f"__annotate_it_{uuid.uuid4().hex}"
     page = f"http://example.test/{uuid.uuid4().hex}"
     quote = [{"type": "TextQuoteSelector", "exact": "hello world"}]
-    _seed(cfg, page, "first note", [tag], selectors=quote)
-    _seed(cfg, page, "second note", [tag])  # no selectors -> target_selectors defaults to []
-    yield cfg, tag, page
+    id1 = _seed(cfg, page, "first note", [tag], selectors=quote)
+    id2 = _seed(cfg, page, "second note", [tag])  # no selectors -> target_selectors defaults to []
+    yield cfg, tag, page, [id1, id2]
     with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM annotation WHERE tags @> ARRAY[%s]::text[]", (tag,))
         conn.commit()
@@ -61,13 +63,13 @@ def _run_rows(cfg: Config, tag: str, **kw: Any) -> list:
 
 @pytest.mark.pg
 def test_list_maps_real_columns_in_created_order(seeded: Any) -> None:
-    cfg, tag, page = seeded
+    cfg, tag, page, api_ids = seeded
     rows = _run_rows(cfg, tag)
 
     assert [a.text for a in rows] == ["first note", "second note"]  # ORDER BY created
+    assert [a.id for a in rows] == api_ids  # uuid column -> h public (API) id
     assert all(a.uri == page for a in rows)  # target_uri -> uri
     assert all(a.group == cfg.group_id for a in rows)  # groupid -> group
-    assert all(isinstance(a.id, str) and a.id for a in rows)  # uuid column -> serializable str id
     # target_selectors -> reconstructed h API target shape (what _exact_quotes consumes)
     assert rows[0].target == [
         {"source": page, "selector": [{"type": "TextQuoteSelector", "exact": "hello world"}]}
@@ -77,7 +79,7 @@ def test_list_maps_real_columns_in_created_order(seeded: Any) -> None:
 
 @pytest.mark.pg
 def test_list_since_is_exclusive_and_until_is_inclusive(seeded: Any) -> None:
-    cfg, tag, _page = seeded
+    cfg, tag, _page, _ids = seeded
     first, second = _run_rows(cfg, tag)
 
     # since is exclusive: drops the row created at exactly `first.created`.
