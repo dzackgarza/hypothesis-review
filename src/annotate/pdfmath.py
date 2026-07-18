@@ -88,7 +88,10 @@ def _ocr_latex(png: bytes) -> str:
         json={
             "src": "data:image/png;base64," + base64.b64encode(png).decode(),
             "formats": ["text"],
-            "math_inline_delimiters": ["$", "$"],
+            # Hypothesis's markdown renders math only in \(..\) (inline) or $$..$$ (block)
+            # delimiters, never single $..$ -- so emit those, which agents read too.
+            "math_inline_delimiters": ["\\(", "\\)"],
+            "math_display_delimiters": ["$$", "$$"],
         },
         timeout=60,
     )

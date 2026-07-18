@@ -26,6 +26,7 @@ import psycopg
 
 from annotate.api import HClient
 from annotate.config import Config
+from annotate.enrich import enrich, is_enriched
 from annotate.ledger import (
     DEFAULT_LEDGER,
     append as ledger_append,
@@ -122,6 +123,8 @@ def _clean_quote(ann: Annotation) -> Annotation:
         return ann
     try:
         if ann.page_index is not None:  # PDF annotation
+            if is_enriched(ann):  # clean math already written into the body during the session
+                return ann
             fetchable = ann.uri.startswith(("http://", "https://"))
             if fetchable and pdf_has_math(q):
                 if not os.environ.get("MATHPIX_API_KEY"):
@@ -199,14 +202,22 @@ def pull(app: App, rel_path: str | None) -> None:
 @_ledger_path_option
 @click.pass_obj
 def wait(app: App, timeout: int, rel_path: str | None) -> None:
-    """Open a session, wait for Send, then record and print the batch JSON."""
+    """Open a session, wait for Send, then record and print the batch JSON. Each poll also
+    renders recovered math into new PDF annotations, so the sidebar shows it mid-session."""
     _require_repo()  # bounce before opening a session whose batch we could not record
     app.client.create_marker(app.group_id, OPEN)
     for _ in range(max(1, timeout // POLL_SECONDS)):
-        batch = _current_batch(app.source, app.group_id)
-        if batch is not None:
-            _deliver(batch.annotations, rel_path)
-            return
+        anns = app.source.list(app.group_id)
+        open_marker = latest_open(anns)
+        if open_marker is not None:
+            _enrich_session_math(anns, open_marker, app.client)
+            try:
+                batch = batch_for(anns, open_marker)
+            except NoSend:
+                batch = None
+            if batch is not None:
+                _deliver(batch.annotations, rel_path)
+                return
         time.sleep(POLL_SECONDS)  # ponytail: fixed 2s poll; make it a flag if DB load matters
     raise click.ClickException(f"timed out after {timeout}s waiting for {SEND!r}")
 
@@ -214,6 +225,20 @@ def wait(app: App, timeout: int, rel_path: str | None) -> None:
 def _not_marker(ann: Annotation) -> bool:
     """A real annotation: not a ``review:open``/``review:send`` session marker."""
     return not (ann.is_marker(OPEN) or ann.is_marker(SEND))
+
+
+def _enrich_session_math(anns: list[Annotation], open_marker: Annotation, client: HClient) -> None:
+    """Render recovered LaTeX into the body of each PDF math annotation created in the
+    current session, so stock Hypothesis shows it in the sidebar within a poll.
+    Per-annotation failures are logged and skipped -- a bad OCR must never stall the
+    session."""
+    session = [a for a in anns if _not_marker(a) and a.created >= open_marker.created]
+    for ann in session:
+        try:
+            if enrich(ann, client):
+                click.echo(f"[annotate] rendered math into annotation {ann.id}", err=True)
+        except (httpx.HTTPError, OSError) as exc:
+            click.echo(f"[annotate] enrich failed for {ann.id}: {exc}", err=True)
 
 
 _DURATION = re.compile(r"^(\d+)([smhd])$")
