@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import pathlib
 import re
 import time
@@ -34,6 +35,7 @@ from annotate.ledger import (
 )
 from annotate.mathquote import clean_quote, has_math
 from annotate.models import Annotation, Batch, LedgerEntry
+from annotate.pdfmath import clean_pdf_quote, pdf_has_math
 from annotate.session import ACTED, OPEN, SEND, NoSend, batch_for, latest_open
 from annotate.source import AnnotationSource, PostgresSource
 
@@ -110,21 +112,39 @@ def _record(anns: list[Annotation], rel_path: str | None) -> list[LedgerEntry]:
     return new
 
 
+def _clean_quote(ann: Annotation) -> Annotation:
+    """One annotation's quote rewritten to clean LaTeX when it spans math. A PDF annotation
+    (it carries a page index) goes through region OCR; an HTML one through the embedded
+    x-tex layer. Any boundary miss — no math, unreachable source, missing OCR key — keeps
+    the raw quote, which is honest, so normalization never blocks delivery."""
+    q = ann.quote
+    if not q:
+        return ann
+    try:
+        if ann.page_index is not None:  # PDF annotation
+            fetchable = ann.uri.startswith(("http://", "https://"))
+            if fetchable and pdf_has_math(q):
+                if not os.environ.get("MATHPIX_API_KEY"):
+                    click.echo(
+                        f"[annotate] MATHPIX_API_KEY not set; leaving PDF math raw for {ann.uri}",
+                        err=True,
+                    )
+                    return ann
+                clean = clean_pdf_quote(ann.uri, ann.page_index, ann.quote_prefix, ann.quote_suffix, q)
+                return dataclasses.replace(ann, quote=clean)
+            return ann
+        if has_math(q):  # HTML annotation
+            return dataclasses.replace(ann, quote=clean_quote(ann.uri, q))
+    except (httpx.HTTPError, OSError) as exc:
+        click.echo(f"[annotate] math normalize failed for {ann.uri}: {exc}", err=True)
+    return ann
+
+
 def _normalize_math(anns: list[Annotation]) -> list[Annotation]:
-    """Rewrite each quote that spans rendered math to clean ``$…$`` LaTeX. Best effort: a
-    page that can't be fetched leaves the raw quote and logs why, so a network blip never
-    breaks delivery."""
-    out: list[Annotation] = []
-    for ann in anns:
-        if not ann.quote or not has_math(ann.quote):
-            out.append(ann)
-            continue
-        try:
-            out.append(dataclasses.replace(ann, quote=clean_quote(ann.uri, ann.quote)))
-        except (httpx.HTTPError, OSError) as exc:
-            click.echo(f"[annotate] math normalize failed for {ann.uri}: {exc}", err=True)
-            out.append(ann)
-    return out
+    """Rewrite math-bearing quotes to clean ``$…$`` LaTeX — PDF via region OCR, HTML via the
+    embedded x-tex layer. Best effort: a source that can't be reached leaves the raw quote
+    and logs why, so a network blip or missing OCR key never breaks delivery."""
+    return [_clean_quote(ann) for ann in anns]
 
 
 def _deliver(anns: list[Annotation], rel_path: str | None) -> None:

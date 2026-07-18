@@ -9,6 +9,7 @@ dependencies = [
     "psycopg[binary]",
     "httpx",
     "beautifulsoup4>=4.15.0",
+    "pymupdf>=1.28.0",
 ]
 
 [project.scripts]

@@ -88,3 +88,34 @@ def test_list_since_is_exclusive_and_until_is_inclusive(seeded: Any) -> None:
     # until is inclusive: keeps the row created at exactly `first.created`.
     assert [a.text for a in _run_rows(cfg, tag, until=first.created)] == ["first note"]
     assert second.created > first.created  # sanity: distinct, ordered timestamps
+
+
+@pytest.fixture
+def seeded_pdf() -> Any:
+    """One PDF-shaped annotation: a TextQuoteSelector carrying prefix/suffix plus a
+    PageSelector — the exact selector shape Hypothesis stores for a PDF highlight, which
+    the PDF math path needs to locate the equation's region. Hard-deleted afterward."""
+    cfg = Config.load()
+    tag = f"__annotate_it_{uuid.uuid4().hex}"
+    page = f"http://example.test/{uuid.uuid4().hex}.pdf"
+    selectors = [
+        {"type": "TextQuoteSelector", "exact": "the flattened equation",
+         "prefix": "the 2-form is given by ", "suffix": " One has the following"},
+        {"type": "PageSelector", "index": 3, "label": "4"},
+    ]
+    _seed(cfg, page, "pdf note", [tag], selectors=selectors)
+    yield cfg, tag
+    with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM annotation WHERE tags @> ARRAY[%s]::text[]", (tag,))
+        conn.commit()
+
+
+@pytest.mark.pg
+def test_from_pg_row_surfaces_pdf_page_and_prose_context(seeded_pdf: Any) -> None:
+    cfg, tag = seeded_pdf
+    [row] = _run_rows(cfg, tag)
+    assert row.page_index == 3  # PageSelector.index -> the page to render and OCR
+    assert row.quote == "the flattened equation"
+    # prefix/suffix are the prose anchors that bracket the equation's region on the page
+    assert row.quote_prefix == "the 2-form is given by "
+    assert row.quote_suffix == " One has the following"
