@@ -79,8 +79,6 @@ class LedgerEntry:
     text: str
     tags: list[str]
     target: Any
-    commit: str
-    state: str
 
     def to_json(self) -> str:
         return json.dumps(dataclasses.asdict(self))

@@ -1,9 +1,10 @@
-"""CLI tests for the batch/ledger/anchor commands (Task 8).
+"""CLI tests for the batch and ledger commands.
 
-Stubs stand in for the Postgres source and h API client, injected via
-``ctx.obj`` exactly as ``test_cli_pull.py`` does. ``rewind``/``delta`` run
-against a throwaway git repo (``core.hooksPath=/dev/null`` isolates it from the
-machine-wide commit gate, mirroring ``test_anchor.py``).
+Stubs stand in for the Postgres source and h API client, injected via ``ctx.obj``
+exactly as ``test_cli_pull.py`` does -- they supply controlled annotation data so these
+tests exercise the CLI's own windowing/output/tagging. The boundaries themselves are
+proved against the live stack in ``test_source.py`` / ``test_api.py``. The ledger
+command runs against a throwaway git repo.
 """
 
 import json
@@ -15,7 +16,7 @@ from click.testing import CliRunner
 from annotate.api import HClient
 from annotate.cli import App, main
 from annotate.config import Config
-from annotate.models import Annotation, LedgerEntry
+from annotate.models import Annotation
 
 
 def _ann(id, created, tags=None):
@@ -70,7 +71,7 @@ def _app(anns, client=None, cfg=None):
     )
 
 
-# Int-timestamped session used by resolve/status (int ordering == chronological).
+# Int-timestamped session used by resolve/status/ledger (int order == chronological).
 OPEN_M = _ann("open", 1, ["review:open"])
 A = _ann("a", 2)
 B = _ann("b", 3)
@@ -102,25 +103,6 @@ def test_status_counts_open_annotations():
     assert "acted=1" in result.output
 
 
-def test_ledger_appends_commit_stamped_entries(tmp_path):
-    deploy_log = tmp_path / "deploy-log.tsv"
-    deploy_log.write_text("2026-07-18T09:00:00\tsha_live\n")
-    ledger_path = tmp_path / "ledger.jsonl"
-    cfg = Config(ledger_path=ledger_path, deploy_log=deploy_log)
-    anns = [
-        _ann("open", "2026-07-18T09:30:00", ["review:open"]),
-        _ann("a", "2026-07-18T10:00:00"),
-        _ann("b", "2026-07-18T10:30:00"),
-        _ann("send", "2026-07-18T11:00:00", ["review:send"]),
-    ]
-    result = CliRunner().invoke(main, ["ledger"], obj=_app(anns, cfg=cfg))
-    assert result.exit_code == 0, result.output
-    printed = json.loads(result.output)
-    assert [e["id"] for e in printed] == ["a", "b"]
-    assert all(e["commit"] == "sha_live" and e["state"] == "open" for e in printed)
-    assert len(ledger_path.read_text().splitlines()) == 2
-
-
 def test_status_root_flags_drifted_quote(tmp_path):
     build = tmp_path / "site"
     build.mkdir()
@@ -142,16 +124,13 @@ def test_status_root_flags_drifted_quote(tmp_path):
     assert "drift\tgone" in result.output
 
 
-# --- rewind / delta against a real throwaway git repo ---
+# --- ledger command against a throwaway git repo -------------------------------
 
 
-def _git(cwd, *args):
+def _git(repo, *args):
     subprocess.run(
         ["git", "-c", "core.hooksPath=/dev/null", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
+        cwd=repo, check=True, capture_output=True, text=True,
     )
 
 
@@ -164,54 +143,40 @@ def _seed_repo(tmp_path):
     (repo / "paper.html").write_text("v1\n")
     _git(repo, "add", "paper.html")
     _git(repo, "commit", "-q", "-m", "v1")
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    return repo, sha
+    return repo
 
 
-def _entry(id, commit, uri="paper.html"):
-    return LedgerEntry(
-        id=id,
-        created="2026-07-18T10:00:00",
-        uri=uri,
-        text="fix",
-        tags=[],
-        target=None,
-        commit=commit,
-        state="open",
-    )
+def _head(repo):
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout
 
 
-def _write_ledger(tmp_path, *entries):
-    p = tmp_path / "ledger.jsonl"
-    p.write_text("".join(e.to_json() + "\n" for e in entries))
-    return p
-
-
-def test_rewind_looks_up_entry_and_prints_checkout_cmd(tmp_path, monkeypatch):
-    repo, sha = _seed_repo(tmp_path)
-    ledger_path = _write_ledger(
-        tmp_path,
-        _entry("other", "0" * 40),  # decoy with a bogus commit
-        _entry("a1", sha),
-    )
+def test_ledger_appends_batch_to_named_path_and_commits_it(tmp_path, monkeypatch):
+    repo = _seed_repo(tmp_path)
     monkeypatch.chdir(repo)
     result = CliRunner().invoke(
-        main, ["rewind", "a1"], obj=_app([], cfg=Config(ledger_path=ledger_path))
+        main, ["ledger", "--path", "feedback/intake.jsonl"], obj=_app([OPEN_M, A, B, SEND_M])
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == f"git checkout {sha}"
+    assert [e["id"] for e in json.loads(result.output)] == ["a", "b"]
+
+    ledger_file = repo / "feedback" / "intake.jsonl"
+    assert len(ledger_file.read_text().splitlines()) == 2  # one line per real annotation
+
+    committed = subprocess.run(
+        ["git", "-C", str(repo), "show", "--name-only", "--format=", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "feedback/intake.jsonl" in committed  # committed, not merely written
 
 
-def test_delta_diffs_annotated_page_since_commit(tmp_path, monkeypatch):
-    repo, sha = _seed_repo(tmp_path)
-    (repo / "paper.html").write_text("v2 changed\n")
-    _git(repo, "commit", "-q", "-am", "v2")
-    ledger_path = _write_ledger(tmp_path, _entry("a1", sha))
+def test_ledger_with_no_send_yet_prints_empty_and_makes_no_commit(tmp_path, monkeypatch):
+    repo = _seed_repo(tmp_path)
     monkeypatch.chdir(repo)
-    result = CliRunner().invoke(
-        main, ["delta", "a1"], obj=_app([], cfg=Config(ledger_path=ledger_path))
-    )
+    before = _head(repo)
+    # open marker but no send -> no batch to record
+    result = CliRunner().invoke(main, ["ledger"], obj=_app([OPEN_M, A]))
     assert result.exit_code == 0, result.output
-    assert "v1" in result.output and "v2 changed" in result.output
+    assert result.output.strip() == "[]"
+    assert _head(repo) == before  # no empty feedback commit

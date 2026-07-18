@@ -20,8 +20,6 @@ class Config:
     pg_dsn: str = "postgresql://postgres@127.0.0.1:5432/postgres"
     group_id: str = ""
     token: str = ""
-    ledger_path: pathlib.Path = pathlib.Path("annotate-ledger.jsonl")
-    deploy_log: pathlib.Path = pathlib.Path("deploy-log.tsv")
 
     @classmethod
     def load(cls, config_path: pathlib.Path = CONFIG_PATH) -> Config:
@@ -38,6 +36,4 @@ class Config:
             pg_dsn=values.get("pg_dsn", cls.pg_dsn),
             group_id=values.get("group_id", cls.group_id),
             token=values.get("token", cls.token),
-            ledger_path=pathlib.Path(values.get("ledger_path", cls.ledger_path)),
-            deploy_log=pathlib.Path(values.get("deploy_log", cls.deploy_log)),
         )

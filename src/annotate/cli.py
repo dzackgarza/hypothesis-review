@@ -20,11 +20,15 @@ from typing import Any
 
 import click
 
-from annotate import anchor
 from annotate.api import HClient
 from annotate.config import Config
-from annotate.ledger import append as ledger_append
-from annotate.models import Annotation, Batch, LedgerEntry
+from annotate.ledger import (
+    append as ledger_append,
+    repo_root as ledger_repo_root,
+    resolve as ledger_resolve,
+    track as ledger_track,
+)
+from annotate.models import Annotation, Batch
 from annotate.session import ACTED, OPEN, SEND, NoSend, batch_for, latest_open
 from annotate.source import AnnotationSource, PostgresSource
 
@@ -169,14 +173,28 @@ def resolve(app: App) -> None:
 
 
 @main.command()
+@click.option(
+    "--path",
+    "rel_path",
+    default=".annotations/feedback.jsonl",
+    show_default=True,
+    help="Ledger file, relative to the ambient git repo root. Name it per workflow "
+    "(e.g. research-intake.jsonl); it is created and tracked if absent.",
+)
 @click.pass_obj
-def ledger(app: App) -> None:
-    """Tee the current batch to the reviewed repo's git-anchored JSONL ledger."""
+def ledger(app: App, rel_path: str) -> None:
+    """Append the current batch to a git-tracked JSONL feedback ledger and commit it."""
     batch = _current_batch(app.source, app.group_id)
-    if batch is None:
+    if batch is None or not batch.annotations:
         click.echo("[]")
         return
-    entries = ledger_append(batch, app.cfg.ledger_path, app.cfg.deploy_log)
+    root = ledger_repo_root(pathlib.Path.cwd())
+    ledger_path = ledger_resolve(pathlib.Path(rel_path), root)
+    entries = ledger_append(batch, ledger_path)
+    ledger_track(
+        ledger_path,
+        f"feedback: record {len(entries)} annotation(s) in {ledger_path.relative_to(root)}",
+    )
     click.echo(json.dumps([dataclasses.asdict(e) for e in entries], default=str))
 
 
@@ -226,32 +244,3 @@ def status(app: App, root: pathlib.Path | None) -> None:
             quotes = _exact_quotes(a.target)
             matches = bool(quotes) and all(q in build for q in quotes)
             click.echo(f"{'match' if matches else 'drift'}\t{a.id}\t{a.uri}")
-
-
-def _find_entry(ledger_path: pathlib.Path, annotation_id: str) -> LedgerEntry:
-    """The ledger entry whose ``id`` is ``annotation_id`` (first match)."""
-    if not ledger_path.exists():
-        raise click.ClickException(f"no ledger at {ledger_path}")
-    for line in ledger_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        entry = LedgerEntry.from_json(line)
-        if entry.id == annotation_id:
-            return entry
-    raise click.ClickException(f"no ledger entry for id {annotation_id!r}")
-
-
-@main.command()
-@click.argument("annotation_id")
-@click.pass_obj
-def rewind(app: App, annotation_id: str) -> None:
-    """Print the ``git checkout`` command restoring the doc as of the feedback."""
-    click.echo(anchor.rewind(_find_entry(app.cfg.ledger_path, annotation_id)))
-
-
-@main.command()
-@click.argument("annotation_id")
-@click.pass_obj
-def delta(app: App, annotation_id: str) -> None:
-    """Print the ``git diff`` of the annotated page since the feedback commit."""
-    click.echo(anchor.delta(_find_entry(app.cfg.ledger_path, annotation_id)))

@@ -19,7 +19,5 @@ def test_ledger_entry_json_round_trip():
         text="needs a citation",
         tags=["review:open"],
         target=[{"source": "http://localhost/paper.html", "selector": []}],
-        commit="abc1234",
-        state="open",
     )
     assert LedgerEntry.from_json(entry.to_json()) == entry
