@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import click
+import httpx
+import psycopg
 
 from annotate.api import HClient
 from annotate.config import Config
@@ -117,7 +119,18 @@ def _deliver(anns: list[Annotation], rel_path: str | None) -> None:
 @click.group()
 @click.pass_context
 def main(ctx: click.Context) -> None:
-    """Git-anchored review loop over self-hosted Hypothesis annotations."""
+    """Git-anchored review loop over self-hosted Hypothesis annotations.
+
+    Workflow: `wait` opens a review session and blocks until you press Send in the browser;
+    it records the whole batch of annotations to a git-tracked ledger and prints it. You act
+    on the feedback, then `resolve` tags it done. `slice` browses annotations made outside a
+    session and `record` preserves the ones worth keeping.
+
+    Recording is not optional: every command that hands feedback to an agent writes it to the
+    ledger (default feedback/ledger.jsonl at the repo root) and commits it first, and refuses
+    to run outside a git repo -- feedback stays auditable alongside the work it concerns. Run
+    `annotate doctor` to check your setup.
+    """
     if ctx.obj is None:
         cfg = Config.load()
         ctx.obj = App(
@@ -132,7 +145,7 @@ def main(ctx: click.Context) -> None:
 @_ledger_path_option
 @click.pass_obj
 def pull(app: App, rel_path: str | None) -> None:
-    """Record and print the current open session's batch as JSON (or ``[]``)."""
+    """Record and print the current open session's batch as JSON (or `[]`)."""
     batch = _current_batch(app.source, app.group_id)
     _deliver(batch.annotations if batch else [], rel_path)
 
@@ -247,7 +260,7 @@ def record(app: App, rel_path: str | None, annotation_ids: tuple[str, ...]) -> N
 @main.command()
 @click.pass_obj
 def resolve(app: App) -> None:
-    """Tag the current batch's annotations ``acted`` via the h API."""
+    """Tag the current batch's annotations `acted` via the h API."""
     batch = _current_batch(app.source, app.group_id)
     anns = batch.annotations if batch else []
     for ann in anns:
@@ -290,7 +303,7 @@ def _build_text(root: pathlib.Path) -> str:
 )
 @click.pass_obj
 def status(app: App, root: pathlib.Path | None) -> None:
-    """Count open vs acted annotations; with ``--root``, flag drifted quotes."""
+    """Count open vs acted annotations; with `--root`, flag drifted quotes."""
     reals = [a for a in app.source.list(app.group_id) if _not_marker(a)]
     open_anns = [a for a in reals if not a.is_marker(ACTED)]
     acted = [a for a in reals if a.is_marker(ACTED)]
@@ -301,3 +314,62 @@ def status(app: App, root: pathlib.Path | None) -> None:
             quotes = _exact_quotes(a.target)
             matches = bool(quotes) and all(q in build for q in quotes)
             click.echo(f"{'match' if matches else 'drift'}\t{a.id}\t{a.uri}")
+
+
+def _h_reachable(api_url: str) -> str:
+    resp = httpx.get(f"{api_url.rstrip('/')}/api/", timeout=3.0)
+    return f"reachable (HTTP {resp.status_code})"
+
+
+def _pg_reachable(dsn: str) -> str:
+    with psycopg.connect(dsn, connect_timeout=3) as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1")
+        cur.fetchone()
+    return "reachable"
+
+
+def _probe(label: str, thunk: Callable[[], str]) -> tuple[bool, str, str]:
+    """Run a diagnostic connection probe and render its outcome as a status row. A doctor
+    check must report an unreachable dependency as status, not crash on it -- the tool's one
+    sanctioned error-to-status boundary."""
+    try:
+        return True, label, thunk()
+    except (httpx.HTTPError, psycopg.Error, OSError) as exc:
+        return False, label, (str(exc).splitlines() or [type(exc).__name__])[0]
+
+
+@main.command()
+@click.pass_obj
+def doctor(app: App) -> None:
+    """Check readiness: git repo (so feedback can be recorded), config, and the h backend.
+
+    Prints one status line per check and exits non-zero if any fails, so an agent can gate a
+    session on it (``annotate doctor && annotate wait``).
+    """
+    cfg = app.cfg
+    rows: list[tuple[bool, str, str]] = []
+
+    root = ledger_repo_root(pathlib.Path.cwd())
+    if root is None:
+        rows.append(
+            (False, "git repo", "not inside one -- no feedback can be recorded; cd into the "
+             "repo you are reviewing, or run `git init`")
+        )
+    else:
+        rows.append((True, "git repo", f"{root} (feedback -> {ledger_resolve(DEFAULT_LEDGER, root)})"))
+
+    missing = [n for n in ("group_id", "token") if not getattr(cfg, n)]
+    if missing:
+        rows.append(
+            (False, "config", f"missing {', '.join(missing)} in ~/.config/annotate/config.toml")
+        )
+    else:
+        rows.append((True, "config", f"group {cfg.group_id}, api {cfg.api_url}"))
+
+    rows.append(_probe("h API", lambda: _h_reachable(cfg.api_url)))
+    rows.append(_probe("Postgres", lambda: _pg_reachable(cfg.pg_dsn)))
+
+    for ok, label, detail in rows:
+        click.echo(f"[{'OK' if ok else 'FAIL'}] {label}: {detail}")
+    if not all(ok for ok, _, _ in rows):
+        raise click.ClickException("not ready -- resolve the FAIL line(s) above")

@@ -13,6 +13,7 @@ from conftest import committed_at_head
 
 from annotate.api import HClient
 from annotate.cli import App, main
+from annotate.config import Config
 from annotate.models import Annotation
 
 
@@ -151,3 +152,24 @@ def test_status_root_flags_drifted_quote(tmp_path):
     assert result.exit_code == 0, result.output
     assert "match\ta" in result.stdout
     assert "drift\tgone" in result.stdout
+
+
+def test_doctor_fails_and_explains_outside_a_git_repo(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["doctor"], obj=_app([]))
+    assert result.exit_code != 0  # a failing check exits non-zero so agents can gate on it
+    assert "[FAIL] git repo" in result.stdout
+    assert "no feedback can be recorded" in result.stdout
+
+
+def test_doctor_reports_git_repo_and_where_feedback_lands(git_repo):
+    app = App(
+        source=_StubSource([]),
+        client=_StubClient(),
+        group_id="g",
+        cfg=Config(group_id="g", token="6879-x"),
+    )
+    result = CliRunner().invoke(main, ["doctor"], obj=app)
+    assert "[OK] git repo" in result.stdout
+    assert "feedback/ledger.jsonl" in result.stdout  # tells the agent where feedback lands
+    assert "[OK] config" in result.stdout
