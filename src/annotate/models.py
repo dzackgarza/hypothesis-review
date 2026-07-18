@@ -31,17 +31,23 @@ class Annotation:
 
     @classmethod
     def from_pg_row(cls, row: dict[str, Any]) -> Annotation:
-        """Map an ``annotation`` table row (``groupid`` → ``group``); ``target``
-        (h selector JSON) and ``tags`` pass through verbatim."""
+        """Map an ``annotation`` table row to the h API annotation shape.
+
+        h stores the page URL in ``target_uri`` and the selectors in
+        ``target_selectors`` (the bare selector list); we reassemble the API
+        ``target`` shape ``[{"source", "selector"}]`` the rest of the tool consumes.
+        ``id`` is a Postgres ``uuid``; stringify it so the annotation stays
+        JSON-serializable (the ledger dumps it without a ``uuid`` encoder).
+        """
         return cls(
-            id=row["id"],
+            id=str(row["id"]),
             created=row["created"],
             userid=row["userid"],
             group=row["groupid"],
-            uri=row["uri"],
+            uri=row["target_uri"],
             text=row["text"],
             tags=list(row["tags"] or []),
-            target=row["target"],
+            target=[{"source": row["target_uri"], "selector": row["target_selectors"]}],
         )
 
 

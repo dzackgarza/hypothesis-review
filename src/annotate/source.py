@@ -46,7 +46,7 @@ def _build_query(
         clauses.append(sql.SQL("created <= %s"))
         params.append(until)
     query = sql.SQL(
-        "SELECT id, created, userid, groupid, uri, text, tags, target "
+        "SELECT id, created, userid, groupid, target_uri, target_selectors, text, tags "
         "FROM annotation WHERE {where} ORDER BY created"
     ).format(where=sql.SQL(" AND ").join(clauses))
     return query, params

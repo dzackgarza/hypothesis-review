@@ -1,131 +1,87 @@
-import os
-import uuid
-from datetime import datetime, timezone
+"""Real-boundary tests for :class:`PostgresSource`.
 
+The read path's whole job is to turn real h ``annotation`` rows into
+:class:`~annotate.models.Annotation` objects. Proving that requires executing the
+real query against the real schema — a SQL-string assertion would pass even when the
+query names columns that do not exist (which is exactly the bug these tests now
+catch). So each test seeds annotations through the **live h API** (the same path the
+browser extension uses — an independent oracle for how h populates the columns), then
+reads them back through Postgres and asserts the mapping.
+
+These require the live h stack (API + Postgres), which is the tool's real boundary:
+if it is absent the tool cannot function, so the tests fail loudly rather than skip.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+import httpx
 import psycopg
 import pytest
-from psycopg.types.json import Json
 
-from annotate.models import Annotation
-from annotate.source import AnnotationSource, PostgresSource, _build_query
+from annotate.config import Config
+from annotate.source import PostgresSource
 
 
-def _ann(text: str, created: datetime, group: str = "grp", tags: list[str] | None = None) -> Annotation:
-    return Annotation(
-        id=uuid.uuid4().hex,
-        created=created,
-        userid="acct:me@localhost",
-        group=group,
-        uri=f"http://example/{text}",
-        text=text,
-        tags=tags or [],
-        target=None,
+def _seed(cfg: Config, uri: str, text: str, tags: list[str], selectors: Any = None) -> None:
+    """Create one annotation via the real h API (as the extension does)."""
+    payload: dict[str, Any] = {"uri": uri, "text": text, "tags": tags, "group": cfg.group_id}
+    if selectors is not None:
+        payload["target"] = [{"source": uri, "selector": selectors}]
+    resp = httpx.post(
+        f"{cfg.api_url}/api/annotations",
+        headers={"Authorization": f"Bearer {cfg.token}"},
+        json=payload,
     )
+    resp.raise_for_status()
 
 
-class _StubSource:
-    """In-memory :class:`AnnotationSource` implementing the interface contract."""
-
-    def __init__(self, anns: list[Annotation]) -> None:
-        self._anns = anns
-
-    def list(
-        self,
-        group_id: str,
-        since: datetime | None = None,
-        until: datetime | None = None,
-    ) -> list[Annotation]:
-        rows = [a for a in self._anns if a.group == group_id]
-        if since is not None:
-            rows = [a for a in rows if a.created > since]
-        if until is not None:
-            rows = [a for a in rows if a.created <= until]
-        return sorted(rows, key=lambda a: a.created)
+@pytest.fixture
+def seeded() -> Any:
+    """Two annotations in creation order in the configured group, tagged with a
+    per-run unique marker for isolation; hard-deleted from Postgres afterward."""
+    cfg = Config.load()
+    tag = f"__annotate_it_{uuid.uuid4().hex}"
+    page = f"http://example.test/{uuid.uuid4().hex}"
+    quote = [{"type": "TextQuoteSelector", "exact": "hello world"}]
+    _seed(cfg, page, "first note", [tag], selectors=quote)
+    _seed(cfg, page, "second note", [tag])  # no selectors -> target_selectors defaults to []
+    yield cfg, tag, page
+    with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM annotation WHERE tags @> ARRAY[%s]::text[]", (tag,))
+        conn.commit()
 
 
-def _dt(day: int) -> datetime:
-    return datetime(2024, 1, day, tzinfo=timezone.utc)
-
-
-# --- interface contract (always-run, stub source) ---------------------------
-
-
-def test_list_orders_by_created_and_includes_markers():
-    marker = _ann("open", _dt(1), tags=["review:open"])
-    src: AnnotationSource = _StubSource([_ann("c", _dt(3)), marker, _ann("b", _dt(2))])
-    got = src.list("grp")
-    assert [a.text for a in got] == ["open", "b", "c"]  # created ascending
-    assert got[0].is_marker("review:open")  # markers are not filtered out
-
-
-def test_since_is_exclusive_and_until_is_inclusive():
-    src = _StubSource([_ann("a", _dt(1)), _ann("b", _dt(2)), _ann("c", _dt(3))])
-    # since=_dt(1) drops the equal-created "a"; until=_dt(2) keeps the equal "b".
-    assert [a.text for a in src.list("grp", since=_dt(1), until=_dt(2))] == ["b"]
-
-
-def test_list_filters_by_group():
-    src = _StubSource([_ann("a", _dt(1), group="grp"), _ann("x", _dt(1), group="other")])
-    assert [a.text for a in src.list("grp")] == ["a"]
-
-
-# --- PostgresSource query assembly (always-run, no DB) ----------------------
-
-
-def test_build_query_base_has_group_and_deleted_filter():
-    query, params = _build_query("g1", None, None)
-    assert query.as_string(None) == (
-        "SELECT id, created, userid, groupid, uri, text, tags, target "
-        "FROM annotation WHERE groupid = %s AND deleted = false ORDER BY created"
-    )
-    assert params == ["g1"]
-
-
-def test_build_query_adds_since_and_until_bounds_in_order():
-    query, params = _build_query("g1", _dt(1), _dt(9))
-    text = query.as_string(None)
-    assert "created > %s" in text
-    assert "created <= %s" in text
-    assert params == ["g1", _dt(1), _dt(9)]
-    assert text.endswith("ORDER BY created")
-
-
-# --- real Postgres (opt-in) -------------------------------------------------
+def _run_rows(cfg: Config, tag: str, **kw: Any) -> list:
+    """PostgresSource rows in the configured group carrying this run's tag."""
+    return [a for a in PostgresSource(cfg.pg_dsn).list(cfg.group_id, **kw) if tag in a.tags]
 
 
 @pytest.mark.pg
-@pytest.mark.skipif(
-    os.environ.get("ANNOTATE_PG_IT") != "1",
-    reason="live h Postgres integration; set ANNOTATE_PG_IT=1",
-)
-def test_postgres_source_lists_rows_ordered():
-    dsn = os.environ.get("ANNOTATE_PG_DSN", "postgresql://postgres@127.0.0.1:5432/postgres")
-    group = f"__annotate_it_{uuid.uuid4().hex}"
-    # ponytail: relies on h annotation defaults for columns beyond these; adjust the
-    # INSERT if the live schema requires more NOT NULL columns.
-    rows = [
-        (uuid.uuid4(), _dt(2), "later", ["review:x"]),
-        (uuid.uuid4(), _dt(1), "earlier", []),
-    ]
-    try:
-        with psycopg.connect(dsn) as conn:
-            with conn.cursor() as cur:
-                for aid, created, text, tags in rows:
-                    cur.execute(
-                        "INSERT INTO annotation "
-                        "(id, created, updated, userid, groupid, uri, text, tags, target, deleted) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, false)",
-                        (aid, created, created, "acct:it@localhost", group,
-                         f"http://example/{text}", text, tags, Json({})),
-                    )
-            conn.commit()
+def test_list_maps_real_columns_in_created_order(seeded: Any) -> None:
+    cfg, tag, page = seeded
+    rows = _run_rows(cfg, tag)
 
-        got = PostgresSource(dsn).list(group)
-        assert [a.text for a in got] == ["earlier", "later"]  # created ascending
-        assert got[0].is_marker("review:x") is False
-        assert got[1].is_marker("review:x") is True
-    finally:
-        with psycopg.connect(dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM annotation WHERE groupid = %s", (group,))
-            conn.commit()
+    assert [a.text for a in rows] == ["first note", "second note"]  # ORDER BY created
+    assert all(a.uri == page for a in rows)  # target_uri -> uri
+    assert all(a.group == cfg.group_id for a in rows)  # groupid -> group
+    assert all(isinstance(a.id, str) and a.id for a in rows)  # uuid column -> serializable str id
+    # target_selectors -> reconstructed h API target shape (what _exact_quotes consumes)
+    assert rows[0].target == [
+        {"source": page, "selector": [{"type": "TextQuoteSelector", "exact": "hello world"}]}
+    ]
+    assert rows[1].target == [{"source": page, "selector": []}]
+
+
+@pytest.mark.pg
+def test_list_since_is_exclusive_and_until_is_inclusive(seeded: Any) -> None:
+    cfg, tag, _page = seeded
+    first, second = _run_rows(cfg, tag)
+
+    # since is exclusive: drops the row created at exactly `first.created`.
+    assert [a.text for a in _run_rows(cfg, tag, since=first.created)] == ["second note"]
+    # until is inclusive: keeps the row created at exactly `first.created`.
+    assert [a.text for a in _run_rows(cfg, tag, until=first.created)] == ["first note"]
+    assert second.created > first.created  # sanity: distinct, ordered timestamps
