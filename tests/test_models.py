@@ -19,5 +19,6 @@ def test_ledger_entry_json_round_trip():
         text="needs a citation",
         tags=["review:open"],
         target=[{"source": "http://localhost/paper.html", "selector": []}],
+        quote="Let $f(x,y)$ be a polynomial",
     )
     assert LedgerEntry.from_json(entry.to_json()) == entry

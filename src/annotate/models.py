@@ -28,6 +28,14 @@ def _public_id(raw: Any) -> str:
     return base64.urlsafe_b64encode(u.bytes).rstrip(b"=").decode()
 
 
+def _quote_of(selectors: Any) -> str:
+    """The highlighted text (``TextQuoteSelector.exact``) from an h selector list."""
+    for sel in selectors or []:
+        if isinstance(sel, dict) and sel.get("type") == "TextQuoteSelector":
+            return sel.get("exact", "")
+    return ""
+
+
 @dataclass(frozen=True)
 class Annotation:
     id: str
@@ -38,6 +46,7 @@ class Annotation:
     text: str
     tags: list[str] = field(default_factory=list)
     target: Any = None
+    quote: str = ""
 
     def is_marker(self, kind: str) -> bool:
         return kind in self.tags
@@ -61,6 +70,7 @@ class Annotation:
             text=row["text"],
             tags=list(row["tags"] or []),
             target=[{"source": row["target_uri"], "selector": row["target_selectors"]}],
+            quote=_quote_of(row["target_selectors"]),
         )
 
 
@@ -79,6 +89,7 @@ class LedgerEntry:
     text: str
     tags: list[str]
     target: Any
+    quote: str
 
     def to_json(self) -> str:
         return json.dumps(dataclasses.asdict(self))

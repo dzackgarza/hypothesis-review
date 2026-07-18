@@ -32,6 +32,7 @@ from annotate.ledger import (
     resolve as ledger_resolve,
     track as ledger_track,
 )
+from annotate.mathquote import clean_quote, has_math
 from annotate.models import Annotation, Batch, LedgerEntry
 from annotate.session import ACTED, OPEN, SEND, NoSend, batch_for, latest_open
 from annotate.source import AnnotationSource, PostgresSource
@@ -109,9 +110,27 @@ def _record(anns: list[Annotation], rel_path: str | None) -> list[LedgerEntry]:
     return new
 
 
+def _normalize_math(anns: list[Annotation]) -> list[Annotation]:
+    """Rewrite each quote that spans rendered math to clean ``$…$`` LaTeX. Best effort: a
+    page that can't be fetched leaves the raw quote and logs why, so a network blip never
+    breaks delivery."""
+    out: list[Annotation] = []
+    for ann in anns:
+        if not ann.quote or not has_math(ann.quote):
+            out.append(ann)
+            continue
+        try:
+            out.append(dataclasses.replace(ann, quote=clean_quote(ann.uri, ann.quote)))
+        except (httpx.HTTPError, OSError) as exc:
+            click.echo(f"[annotate] math normalize failed for {ann.uri}: {exc}", err=True)
+            out.append(ann)
+    return out
+
+
 def _deliver(anns: list[Annotation], rel_path: str | None) -> None:
     """Record the delivered annotations, then print the batch to stdout. Recording runs
     first, so feedback can never reach the agent unrecorded."""
+    anns = _normalize_math(anns)
     _record(anns, rel_path)
     click.echo(_anns_json(anns))
 
@@ -253,7 +272,7 @@ def record(app: App, rel_path: str | None, annotation_ids: tuple[str, ...]) -> N
     missing = [i for i in annotation_ids if i not in by_id]
     if missing:
         raise click.ClickException(f"annotation id(s) not in the group: {', '.join(missing)}")
-    new = _record([by_id[i] for i in annotation_ids], rel_path)
+    new = _record(_normalize_math([by_id[i] for i in annotation_ids]), rel_path)
     click.echo(json.dumps([dataclasses.asdict(e) for e in new], default=str))
 
 

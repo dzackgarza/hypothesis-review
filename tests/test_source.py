@@ -68,6 +68,7 @@ def test_list_maps_real_columns_in_created_order(seeded: Any) -> None:
 
     assert [a.text for a in rows] == ["first note", "second note"]  # ORDER BY created
     assert [a.id for a in rows] == api_ids  # uuid column -> h public (API) id
+    assert rows[0].quote == "hello world"  # TextQuoteSelector.exact -> quote
     assert all(a.uri == page for a in rows)  # target_uri -> uri
     assert all(a.group == cfg.group_id for a in rows)  # groupid -> group
     # target_selectors -> reconstructed h API target shape (what _exact_quotes consumes)

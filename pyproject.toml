@@ -8,6 +8,7 @@ dependencies = [
     "click",
     "psycopg[binary]",
     "httpx",
+    "beautifulsoup4>=4.15.0",
 ]
 
 [project.scripts]

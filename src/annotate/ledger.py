@@ -69,6 +69,7 @@ def append(annotations: list[Annotation], ledger_path: pathlib.Path) -> list[Led
             text=ann.text,
             tags=list(ann.tags),
             target=ann.target,
+            quote=ann.quote,
         )
         for ann in annotations
         if ann.id not in seen
