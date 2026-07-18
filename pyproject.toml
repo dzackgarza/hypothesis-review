@@ -1,0 +1,38 @@
+[project]
+name = "annotate"
+version = "0.1.0"
+description = "Git-anchored, agent-driven review loop over self-hosted Hypothesis annotations."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click",
+    "psycopg[binary]",
+    "httpx",
+]
+
+[project.scripts]
+annotate = "annotate.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "pyright",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/annotate"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+markers = [
+    "pg: integration test requiring the live Postgres (opt-in: ANNOTATE_PG_IT=1)",
+    "e2e: end-to-end test against the live h (opt-in: ANNOTATE_E2E=1)",
+]
