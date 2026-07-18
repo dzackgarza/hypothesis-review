@@ -1,14 +1,16 @@
 """Append web feedback to a git-tracked JSONL ledger in the ambient repo.
 
-A ledger is a JSONL file the agent names for the workflow (``research-intake.jsonl``,
-``book-updates.jsonl``, ``app-feedback.jsonl``) at a path inside the repo being worked
-on. There is no deploy-log or version anchoring: the ledger is committed, so git's own
-history places each entry next to the code state it landed against, and an agent
-cross-references from there.
+Every batch an agent receives is recorded here — recording is not optional, it is how the
+tool forces feedback to stay auditable alongside the work. The ledger is a JSONL file at a
+repo-relative path (default :data:`DEFAULT_LEDGER`, or an agent-named per-workflow file);
+:func:`append` dedups by annotation id, so it is the complete, non-duplicated record of
+every note handed to an agent.
 
-:func:`track` commits the ledger file only, with hooks bypassed -- feedback capture is
-data, not a code change; it must not run (or be blocked by) the repo's commit gate, and
-must record while the repo is mid-edit.
+There is no deploy-log or version anchoring: the ledger is committed, so git's own history
+places each entry next to the code state it landed against, and an agent cross-references
+from there. :func:`track` commits the ledger file only, with hooks bypassed -- feedback is
+data, not a code change; it must not be blocked by the repo's commit gate and must record
+while the repo is mid-edit.
 """
 
 from __future__ import annotations
@@ -16,17 +18,23 @@ from __future__ import annotations
 import pathlib
 import subprocess
 
-from annotate.models import Batch, LedgerEntry
+from annotate.models import Annotation, LedgerEntry
+
+#: Canonical, repo-root-relative ledger used when the agent names none. Visible (not a
+#: hidden dir) and repo-wide, so all feedback is findable and auditable in one place.
+DEFAULT_LEDGER = pathlib.Path("feedback/ledger.jsonl")
 
 
-def repo_root(cwd: pathlib.Path) -> pathlib.Path:
-    """The git top-level of the repo containing ``cwd`` (raises if ``cwd`` is not
-    inside a git repository)."""
-    out = subprocess.run(
+def repo_root(cwd: pathlib.Path) -> pathlib.Path | None:
+    """The git top-level of the repo containing ``cwd``, or ``None`` if ``cwd`` is not
+    inside a git repository (the caller bounces on ``None`` — feedback must be tracked)."""
+    result = subprocess.run(
         ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-        check=True, capture_output=True, text=True,
+        capture_output=True, text=True,
     )
-    return pathlib.Path(out.stdout.strip())
+    if result.returncode != 0:
+        return None
+    return pathlib.Path(result.stdout.strip())
 
 
 def resolve(rel_path: pathlib.Path, root: pathlib.Path) -> pathlib.Path:
@@ -38,9 +46,21 @@ def resolve(rel_path: pathlib.Path, root: pathlib.Path) -> pathlib.Path:
     return abs_path
 
 
-def append(batch: Batch, ledger_path: pathlib.Path) -> list[LedgerEntry]:
-    """Append one JSONL line per batch annotation to ``ledger_path``; return the
-    entries. ``created`` is stringified so the entry stays JSON-serializable."""
+def _recorded_ids(ledger_path: pathlib.Path) -> set[str]:
+    if not ledger_path.exists():
+        return set()
+    return {
+        LedgerEntry.from_json(line).id
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+
+
+def append(annotations: list[Annotation], ledger_path: pathlib.Path) -> list[LedgerEntry]:
+    """Append one JSONL line per annotation whose id is not already recorded; return the
+    newly written entries (``[]`` if every id was already present, so there is nothing to
+    commit). ``created`` is stringified so the entry stays JSON-serializable."""
+    seen = _recorded_ids(ledger_path)
     entries = [
         LedgerEntry(
             id=ann.id,
@@ -50,8 +70,11 @@ def append(batch: Batch, ledger_path: pathlib.Path) -> list[LedgerEntry]:
             tags=list(ann.tags),
             target=ann.target,
         )
-        for ann in batch.annotations
+        for ann in annotations
+        if ann.id not in seen
     ]
+    if not entries:
+        return []
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     with ledger_path.open("a", encoding="utf-8") as fh:
         for entry in entries:
@@ -62,9 +85,9 @@ def append(batch: Batch, ledger_path: pathlib.Path) -> list[LedgerEntry]:
 def track(ledger_path: pathlib.Path, message: str) -> None:
     """``git add`` + commit the ledger file only, bypassing hooks.
 
-    ``--no-verify`` is mandatory: the machine-wide ``core.hooksPath`` gate would
-    otherwise run the code QC suite on this data commit. The ``-- <path>`` pathspec
-    commits the ledger alone, leaving any in-progress work in the repo uncommitted.
+    ``--no-verify`` is mandatory: the machine-wide ``core.hooksPath`` gate would otherwise
+    run the code QC suite on this data commit. The ``-- <path>`` pathspec commits the ledger
+    alone, leaving any in-progress work in the repo uncommitted.
     """
     d = str(ledger_path.parent)
     path = str(ledger_path)

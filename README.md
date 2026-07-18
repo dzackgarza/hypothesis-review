@@ -9,8 +9,9 @@ marks it resolved. Feedback can't be silently dropped or half-applied. The ledge
 committed alongside the code, so git's own history anchors every note to the state it landed
 against.
 
-- **`annotate` CLI** — `wait` / `pull` / `slice` / `ledger` / `resolve` / `status` over the
-  Hypothesis API + git.
+- **`annotate` CLI** — `wait` / `pull` / `slice` / `record` / `resolve` / `status` over the
+  Hypothesis API + git. Every command that hands feedback to an agent records it in the
+  ledger first, and bounces unless run inside a git repo — there is no unrecorded mode.
 - **Browser-extension fork** — a small injected floating "Send to agent" button (no
   Hypothesis-client fork).
 

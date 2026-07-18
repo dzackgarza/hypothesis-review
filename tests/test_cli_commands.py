@@ -1,21 +1,18 @@
-"""CLI tests for the batch and ledger commands.
+"""CLI tests for slice (read-only view + guidance), record (append by id), resolve, status.
 
-Stubs stand in for the Postgres source and h API client, injected via ``ctx.obj``
-exactly as ``test_cli_pull.py`` does -- they supply controlled annotation data so these
-tests exercise the CLI's own windowing/output/tagging. The boundaries themselves are
-proved against the live stack in ``test_source.py`` / ``test_api.py``. The ledger
-command runs against a throwaway git repo.
+slice/resolve/status touch no ledger, so they need no repo; record commits into the
+throwaway ``git_repo`` fixture. Stubs supply annotation data via ``ctx.obj``.
 """
 
 import json
-import subprocess
 from datetime import datetime, timedelta
 
 from click.testing import CliRunner
 
+from conftest import committed_at_head
+
 from annotate.api import HClient
 from annotate.cli import App, main
-from annotate.config import Config
 from annotate.models import Annotation
 
 
@@ -62,16 +59,11 @@ class _StubClient(HClient):
         self.tagged.append((annotation_id, list(add)))
 
 
-def _app(anns, client=None, cfg=None):
-    return App(
-        source=_StubSource(anns),
-        client=client or _StubClient(),
-        group_id="grp",
-        cfg=cfg or Config(),
-    )
+def _app(anns, client=None):
+    return App(source=_StubSource(anns), client=client or _StubClient(), group_id="grp")
 
 
-# Int-timestamped session used by resolve/status/ledger (int order == chronological).
+# Int-timestamped session (int order == chronological).
 OPEN_M = _ann("open", 1, ["review:open"])
 A = _ann("a", 2)
 B = _ann("b", 3)
@@ -85,7 +77,44 @@ def test_slice_last_returns_only_in_window_non_markers():
     marker = _ann("open", now - timedelta(minutes=20), ["review:open"])
     result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([recent, old, marker]))
     assert result.exit_code == 0, result.output
-    assert [a["id"] for a in json.loads(result.output)] == ["recent"]
+    assert [a["id"] for a in json.loads(result.stdout)] == ["recent"]
+
+
+def test_slice_points_at_record_for_preservation():
+    now = datetime.now()
+    recent = _ann("recent", now - timedelta(minutes=30))
+    result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([recent]))
+    assert result.exit_code == 0, result.output
+    assert "annotate record recent" in result.stderr  # guidance names the command + id
+
+
+def test_slice_with_no_hits_gives_no_record_guidance():
+    result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([]))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    assert "annotate record" not in result.stderr
+
+
+def test_record_appends_named_annotations_and_commits(git_repo):
+    result = CliRunner().invoke(main, ["record", "a", "b"], obj=_app([OPEN_M, A, B, SEND_M]))
+    assert result.exit_code == 0, result.output
+    assert [e["id"] for e in json.loads(result.stdout)] == ["a", "b"]  # recorded entries
+    ledger = git_repo / "feedback" / "ledger.jsonl"
+    assert [json.loads(line)["id"] for line in ledger.read_text().splitlines()] == ["a", "b"]
+    assert "feedback/ledger.jsonl" in committed_at_head(git_repo)
+
+
+def test_record_rejects_an_unknown_id(git_repo):
+    result = CliRunner().invoke(main, ["record", "nope"], obj=_app([OPEN_M, A, B, SEND_M]))
+    assert result.exit_code != 0
+    assert "not in the group" in result.stderr
+
+
+def test_record_bounces_outside_a_git_repo(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["record", "a"], obj=_app([A]))
+    assert result.exit_code != 0
+    assert "not inside a git repository" in result.stderr
 
 
 def test_resolve_tags_each_batch_member_acted():
@@ -99,8 +128,8 @@ def test_status_counts_open_annotations():
     acted = _ann("c", 5, ["acted"])
     result = CliRunner().invoke(main, ["status"], obj=_app([OPEN_M, A, B, SEND_M, acted]))
     assert result.exit_code == 0, result.output
-    assert "open=2" in result.output
-    assert "acted=1" in result.output
+    assert "open=2" in result.stdout
+    assert "acted=1" in result.stdout
 
 
 def test_status_root_flags_drifted_quote(tmp_path):
@@ -120,63 +149,5 @@ def test_status_root_flags_drifted_quote(tmp_path):
     )
     result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([A, drift]))
     assert result.exit_code == 0, result.output
-    assert "match\ta" in result.output
-    assert "drift\tgone" in result.output
-
-
-# --- ledger command against a throwaway git repo -------------------------------
-
-
-def _git(repo, *args):
-    subprocess.run(
-        ["git", "-c", "core.hooksPath=/dev/null", *args],
-        cwd=repo, check=True, capture_output=True, text=True,
-    )
-
-
-def _seed_repo(tmp_path):
-    repo = tmp_path / "reviewed"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "t@t")
-    _git(repo, "config", "user.name", "t")
-    (repo / "paper.html").write_text("v1\n")
-    _git(repo, "add", "paper.html")
-    _git(repo, "commit", "-q", "-m", "v1")
-    return repo
-
-
-def _head(repo):
-    return subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout
-
-
-def test_ledger_appends_batch_to_named_path_and_commits_it(tmp_path, monkeypatch):
-    repo = _seed_repo(tmp_path)
-    monkeypatch.chdir(repo)
-    result = CliRunner().invoke(
-        main, ["ledger", "--path", "feedback/intake.jsonl"], obj=_app([OPEN_M, A, B, SEND_M])
-    )
-    assert result.exit_code == 0, result.output
-    assert [e["id"] for e in json.loads(result.output)] == ["a", "b"]
-
-    ledger_file = repo / "feedback" / "intake.jsonl"
-    assert len(ledger_file.read_text().splitlines()) == 2  # one line per real annotation
-
-    committed = subprocess.run(
-        ["git", "-C", str(repo), "show", "--name-only", "--format=", "HEAD"],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    assert "feedback/intake.jsonl" in committed  # committed, not merely written
-
-
-def test_ledger_with_no_send_yet_prints_empty_and_makes_no_commit(tmp_path, monkeypatch):
-    repo = _seed_repo(tmp_path)
-    monkeypatch.chdir(repo)
-    before = _head(repo)
-    # open marker but no send -> no batch to record
-    result = CliRunner().invoke(main, ["ledger"], obj=_app([OPEN_M, A]))
-    assert result.exit_code == 0, result.output
-    assert result.output.strip() == "[]"
-    assert _head(repo) == before  # no empty feedback commit
+    assert "match\ta" in result.stdout
+    assert "drift\tgone" in result.stdout

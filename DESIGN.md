@@ -23,7 +23,7 @@ reimplement `git checkout` / `git diff`.
 
 ```
 agent opens session  →  reviewer annotates freely (any pages)  →  reviewer presses Send
-    →  agent `wait` returns the whole window  →  append to the git-tracked ledger
+    →  agent `wait` records the whole window to the git-tracked ledger, returns it
     →  agent acts (edit + commit)  →  tag the batch `acted`  →  document updates
     →  next session opens clean
 ```
@@ -74,20 +74,22 @@ swept by the next session's window — for that ad-hoc case, see `slice`.
   the batch. Act-signal and window-bound are one object.
 
 ### 4. The CLI (`annotate`, Python)
-Opinionated glue over the h API + git:
-- `wait` — opens a session (posts the open marker) and blocks as a **background job** until
-  the drain marker; exits with the batch on stdout (the harness wakes the same agent).
-  Subscribes to h's websocket (`:5001`) or polls `/api/search`.
-- `pull` — the current window's batch as structured JSON.
-- `slice [--since T] [--until T] [--last DUR] [--uri PAT]` — **read-only, ad-hoc**: return
+Opinionated glue over the h API + git. Every feedback-delivering command **preflights** the
+git repo and **bounces** if you're not in one — recording is not optional, so there is no
+unrecorded mode. `--path` names a per-workflow ledger (still repo-root-relative); omit it for
+the canonical default `feedback/ledger.jsonl`, whose absolute path is logged to stderr so the
+agent knows where feedback lands. Recording dedups by annotation id, so re-runs never double it.
+- `wait [--path P]` — opens a session (posts the open marker) and blocks as a **background
+  job** until the drain marker; **records the batch to the ledger, then** exits with it on
+  stdout (the harness wakes the same agent).
+- `pull [--path P]` — records and prints the current window's batch as structured JSON.
+- `slice [--since T] [--until T] [--last DUR] [--uri PAT]` — **read-only, ad-hoc** view:
   annotations in an arbitrary datetime window, ignoring markers. The escape hatch for
   "annotated a paper as I read, never opened a session, now synthesize what I marked in the
-  last hour" — timing alone carries the intent.
-- `ledger [--path P]` — append the batch to a git-tracked JSONL ledger at an agent-named,
-  repo-relative path (default `.annotations/feedback.jsonl`; name it per workflow, e.g.
-  `research-intake.jsonl`), then `git add` + commit it. A path that does not exist yet is
-  created and tracked. The commit bypasses the code gate — feedback is data, not code, and
-  must record while the repo is mid-edit.
+  last hour." It records nothing itself; it prints the ids and an `annotate record` line to
+  preserve the ones worth keeping.
+- `record <id>... [--path P]` — append specific annotations (by id) to the ledger and commit;
+  the record step for the ad-hoc `slice` view, where the agent chooses what to preserve.
 - `resolve` — tag the batch **`acted`** (non-destructive) so it can't re-fire.
 - `status` — pending / open / resolved; per open annotation, whether its anchor still
   resolves in the current build (drift/thrash detection).

@@ -1,11 +1,11 @@
 """annotate CLI.
 
-``pull`` prints the current open session's batch as JSON (or ``[]``); ``wait``
-posts a ``review:open`` marker, then polls Postgres until the matching
-``review:send`` marker lands and prints the batch — the command an agent runs
-as a background job. Reads go through :mod:`annotate.source`, the open marker
-through :mod:`annotate.api`; both are injected via the click context object so
-tests swap in stubs (see ``tests/test_cli_pull.py``).
+The tool forces one thing: every batch of feedback an agent receives is recorded in a
+git-tracked ledger. ``wait`` and ``pull`` record-then-print (they bounce unless run inside
+a git repo — there is no unrecorded mode); ``slice`` is a read-only ad-hoc view that points
+at ``record``; ``record`` appends chosen annotations. Reads go through
+:mod:`annotate.source`, marker writes through :mod:`annotate.api`; both are injected via the
+click context object so tests swap in stubs.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import json
 import pathlib
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -23,12 +24,13 @@ import click
 from annotate.api import HClient
 from annotate.config import Config
 from annotate.ledger import (
+    DEFAULT_LEDGER,
     append as ledger_append,
     repo_root as ledger_repo_root,
     resolve as ledger_resolve,
     track as ledger_track,
 )
-from annotate.models import Annotation, Batch
+from annotate.models import Annotation, Batch, LedgerEntry
 from annotate.session import ACTED, OPEN, SEND, NoSend, batch_for, latest_open
 from annotate.source import AnnotationSource, PostgresSource
 
@@ -62,6 +64,56 @@ def _anns_json(anns: list[Annotation]) -> str:
     return json.dumps([dataclasses.asdict(a) for a in anns], default=str)
 
 
+def _ledger_path_option(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Shared ``--path`` option for the recording commands."""
+    return click.option(
+        "--path",
+        "rel_path",
+        default=None,
+        help="Ledger file, relative to the repo root. Defaults to feedback/ledger.jsonl; "
+        "name it per workflow (e.g. research-intake.jsonl). Created and tracked if absent.",
+    )(f)
+
+
+def _require_repo() -> pathlib.Path:
+    """Preflight: the working directory must be inside a git repo, else bounce. Feedback is
+    only worth capturing if it is tracked alongside the work it concerns."""
+    root = ledger_repo_root(pathlib.Path.cwd())
+    if root is None:
+        raise click.ClickException(
+            "not inside a git repository. annotate records every batch of feedback in a "
+            "git-tracked ledger so it stays auditable alongside the work it concerns. Run "
+            "this from within the repo you are reviewing (or `git init` one first). There "
+            "is no unrecorded mode."
+        )
+    return root
+
+
+def _record(anns: list[Annotation], rel_path: str | None) -> list[LedgerEntry]:
+    """Append annotations to the ledger (deduped by id) and commit; log to stderr where
+    they landed. Returns the newly recorded entries."""
+    root = _require_repo()
+    ledger_path = ledger_resolve(pathlib.Path(rel_path) if rel_path else DEFAULT_LEDGER, root)
+    new = ledger_append(anns, ledger_path)
+    if new:
+        ledger_track(
+            ledger_path,
+            f"feedback: record {len(new)} annotation(s) in {ledger_path.relative_to(root)}",
+        )
+    note = f"[annotate] recorded {len(new)} new of {len(anns)} annotation(s) -> {ledger_path}"
+    if rel_path is None:
+        note += " (default ledger -- all feedback is recorded here)"
+    click.echo(note, err=True)
+    return new
+
+
+def _deliver(anns: list[Annotation], rel_path: str | None) -> None:
+    """Record the delivered annotations, then print the batch to stdout. Recording runs
+    first, so feedback can never reach the agent unrecorded."""
+    _record(anns, rel_path)
+    click.echo(_anns_json(anns))
+
+
 @click.group()
 @click.pass_context
 def main(ctx: click.Context) -> None:
@@ -77,11 +129,12 @@ def main(ctx: click.Context) -> None:
 
 
 @main.command()
+@_ledger_path_option
 @click.pass_obj
-def pull(app: App) -> None:
-    """Print the current open session's batch as JSON, or ``[]``."""
+def pull(app: App, rel_path: str | None) -> None:
+    """Record and print the current open session's batch as JSON (or ``[]``)."""
     batch = _current_batch(app.source, app.group_id)
-    click.echo(_anns_json(batch.annotations if batch else []))
+    _deliver(batch.annotations if batch else [], rel_path)
 
 
 @main.command()
@@ -91,14 +144,16 @@ def pull(app: App) -> None:
     show_default=True,
     help="Max seconds to wait for the review:send marker.",
 )
+@_ledger_path_option
 @click.pass_obj
-def wait(app: App, timeout: int) -> None:
-    """Open a session, then poll until it is sent and print the batch JSON."""
+def wait(app: App, timeout: int, rel_path: str | None) -> None:
+    """Open a session, wait for Send, then record and print the batch JSON."""
+    _require_repo()  # bounce before opening a session whose batch we could not record
     app.client.create_marker(app.group_id, OPEN)
     for _ in range(max(1, timeout // POLL_SECONDS)):
         batch = _current_batch(app.source, app.group_id)
         if batch is not None:
-            click.echo(_anns_json(batch.annotations))
+            _deliver(batch.annotations, rel_path)
             return
         time.sleep(POLL_SECONDS)  # ponytail: fixed 2s poll; make it a flag if DB load matters
     raise click.ClickException(f"timed out after {timeout}s waiting for {SEND!r}")
@@ -150,7 +205,11 @@ def slice_(
     last: str | None,
     uri: str | None,
 ) -> None:
-    """Print real annotations in a time window as JSON (read-only; ignores markers)."""
+    """Print real annotations in a time window as JSON (read-only view; ignores markers).
+
+    A convenience for browsing ad-hoc annotations made outside a session. It records
+    nothing; preserve the ones worth acting on with ``annotate record <id>...``.
+    """
     if last is not None:
         if since is not None:
             raise click.UsageError("--last and --since are mutually exclusive")
@@ -159,6 +218,30 @@ def slice_(
     if uri is not None:
         anns = [a for a in anns if a.uri == uri]
     click.echo(_anns_json(anns))
+    if anns:
+        click.echo(
+            f"[annotate] {len(anns)} shown, not recorded. Preserve the relevant ones with:\n"
+            f"    annotate record {' '.join(a.id for a in anns)}",
+            err=True,
+        )
+
+
+@main.command()
+@_ledger_path_option
+@click.argument("annotation_ids", nargs=-1, required=True)
+@click.pass_obj
+def record(app: App, rel_path: str | None, annotation_ids: tuple[str, ...]) -> None:
+    """Append specific annotations (by id) to the ledger and commit.
+
+    The record step for the ad-hoc ``slice`` view: you choose which notes to preserve, then
+    hand their ids here. Prints the newly recorded entries as JSON.
+    """
+    by_id = {a.id: a for a in app.source.list(app.group_id)}
+    missing = [i for i in annotation_ids if i not in by_id]
+    if missing:
+        raise click.ClickException(f"annotation id(s) not in the group: {', '.join(missing)}")
+    new = _record([by_id[i] for i in annotation_ids], rel_path)
+    click.echo(json.dumps([dataclasses.asdict(e) for e in new], default=str))
 
 
 @main.command()
@@ -170,32 +253,6 @@ def resolve(app: App) -> None:
     for ann in anns:
         app.client.tag(ann.id, [ACTED])
     click.echo(f"tagged {len(anns)} annotation(s) {ACTED!r}")
-
-
-@main.command()
-@click.option(
-    "--path",
-    "rel_path",
-    default=".annotations/feedback.jsonl",
-    show_default=True,
-    help="Ledger file, relative to the ambient git repo root. Name it per workflow "
-    "(e.g. research-intake.jsonl); it is created and tracked if absent.",
-)
-@click.pass_obj
-def ledger(app: App, rel_path: str) -> None:
-    """Append the current batch to a git-tracked JSONL feedback ledger and commit it."""
-    batch = _current_batch(app.source, app.group_id)
-    if batch is None or not batch.annotations:
-        click.echo("[]")
-        return
-    root = ledger_repo_root(pathlib.Path.cwd())
-    ledger_path = ledger_resolve(pathlib.Path(rel_path), root)
-    entries = ledger_append(batch, ledger_path)
-    ledger_track(
-        ledger_path,
-        f"feedback: record {len(entries)} annotation(s) in {ledger_path.relative_to(root)}",
-    )
-    click.echo(json.dumps([dataclasses.asdict(e) for e in entries], default=str))
 
 
 def _exact_quotes(target: Any) -> list[str]:
