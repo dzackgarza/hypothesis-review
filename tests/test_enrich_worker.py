@@ -23,12 +23,14 @@ def _annotation(selectors: list[dict], uri: str = "https://example.test/a") -> d
     return {"uri": uri, "target": [{"selector": selectors}]}
 
 
-def test_normalize_skips_html_annotations():
-    # No PageSelector -> an HTML annotation -> left for the client's reconstruction.
+def test_normalize_falls_back_to_raw_for_an_unreachable_html_page():
+    # No PageSelector -> HTML. With an unreachable page the reconstruction yields nothing, so
+    # the raw quote is stored (a row still exists, so the client never recomputes).
     annotation = _annotation(
-        [{"type": "TextQuoteSelector", "exact": "They satisfy 2K ∼ 0"}]
+        [{"type": "TextQuoteSelector", "exact": "They satisfy 2K ∼ 0"}],
+        uri="http://unreachable.invalid/doc",
     )
-    assert enrich_worker.normalize(annotation) is None
+    assert enrich_worker.normalize(annotation) == ("They satisfy 2K ∼ 0", "raw")
 
 
 def test_normalize_skips_when_there_is_no_quote():
