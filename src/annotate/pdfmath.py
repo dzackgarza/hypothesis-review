@@ -5,12 +5,12 @@ flattened text layer, which loses 2D structure and can silently corrupt it — `
 as ``12``, a fraction shattered across lines. The only recovery is OCR of the rendered
 region.
 
-A Hypothesis PDF annotation carries the page (``PageSelector.index``) and clean-prose
-``prefix``/``suffix`` around the selection. We fetch the PDF, render that page, crop the
-band the annotation occupies (bracketed by the two prose anchors), and OCR the crop with
-Mathpix -> clean ``$…$`` LaTeX. This mirrors :mod:`annotate.mathquote` for the HTML case;
-like it, it cleans only the *agent's* copy — the stored selectors (anchoring) are never
-touched.
+A Hypothesis PDF annotation carries the page (``PageSelector.index``) and the selected
+text. We fetch the PDF, render that page, crop the bounding box of the selection —
+located from the page's own words, so every line it spans is captured at the text
+column's width — and OCR the crop with Mathpix -> clean ``$…$`` LaTeX. This mirrors
+:mod:`annotate.mathquote` for the HTML case; like it, it cleans only the *agent's* copy —
+the stored selectors (anchoring) are never touched.
 """
 
 from __future__ import annotations
@@ -35,8 +35,7 @@ _PDF_MATH = re.compile(
     "]"
 )
 
-_DPI = 220  # render resolution of the cropped band; reads cleanly for Mathpix
-_ANCHOR = 40  # chars of the prefix tail / suffix head used to locate the band
+_DPI = 220  # render resolution of the cropped region; reads cleanly for Mathpix
 
 
 def pdf_has_math(quote: str) -> bool:
@@ -46,35 +45,82 @@ def pdf_has_math(quote: str) -> bool:
     return bool(_PDF_MATH.search(quote))
 
 
-def _anchor(text: str, *, head: bool) -> str:
-    """A single-line search needle from a prefix/suffix: its first (``head``) or last line,
-    trimmed to :data:`_ANCHOR` chars. ``search_for`` matches within a line, so a needle
-    that straddles a line break would never hit."""
-    lines = [s for s in text.splitlines() if s.strip()]
-    if not lines:
-        return ""
-    line = lines[0] if head else lines[-1]
-    return (line[:_ANCHOR] if head else line[-_ANCHOR:]).strip()
+def _norm(text: str) -> str:
+    """A word reduced to lowercase alphanumerics, for matching the flattened text-layer
+    quote against the page's own words — punctuation, case, and hyphenation differ between
+    the two, but the alphanumeric core does not."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def _band(page: fitz.Page, prefix: str, suffix: str) -> fitz.Rect | None:
-    """The full-width strip of ``page`` between the prose ``prefix`` and ``suffix`` — the
-    region the annotation occupies. ``None`` when either anchor can't be located, so the
-    caller keeps the raw quote rather than OCR the wrong region."""
-    top, bottom = 0.0, page.rect.height
-    if prefix:
-        hits = page.search_for(_anchor(prefix, head=False))
-        if not hits:
-            return None
-        top = max(r.y1 for r in hits)
-    if suffix:
-        hits = [r for r in page.search_for(_anchor(suffix, head=True)) if r.y0 >= top]
-        if not hits:
-            return None
-        bottom = min(r.y0 for r in hits)
-    if bottom <= top:
+def _match_end(forms: list[str], ngram: list[str]) -> int | None:
+    """Index of the final word of the last contiguous occurrence of ``ngram`` in ``forms``."""
+    needle = [w for w in ngram if w]
+    if not needle:
         return None
-    return fitz.Rect(0, top, page.rect.width, bottom)
+    for i in range(len(forms) - len(needle), -1, -1):
+        if forms[i : i + len(needle)] == needle:
+            return i + len(needle) - 1
+    return None
+
+
+def _quote_rect(page: fitz.Page, exact: str) -> fitz.Rect | None:
+    """The bounding box of the annotated text on ``page`` — every line the quote spans, at
+    the text column's own width. Located from the quote's own words: its prose anchors the
+    two ends (the math between need not match the flattened glyphs), so a multi-line
+    selection is captured whole, not collapsed to the single middle strip a prefix/suffix
+    bracket can produce, and the column-tight width excludes marginal ink (e.g. arXiv's
+    vertical id stamp). ``None`` when the quote can't be located, so the caller keeps the
+    raw text rather than OCR the wrong region."""
+    entries = [(_norm(w[4]), fitz.Rect(w[:4])) for w in page.get_text("words")]
+    forms = [form for form, _ in entries]
+    qwords = [w for w in (_norm(t) for t in exact.split()) if w]
+    if not entries or not qwords:
+        return None
+    # Bottom anchor: the quote's last prose words (math rarely sits at the very tail).
+    end = next(
+        (e for k in (4, 3, 2, 1) if (e := _match_end(forms, qwords[-k:])) is not None),
+        None,
+    )
+    if end is None:
+        return None
+    # Top anchor: the earliest quote word that occurs at or before the tail. When it repeats
+    # (both across the page and *within* the quote, e.g. "Enriques ... Enriques"), pick the
+    # occurrence nearest where the start should fall given the tail and the quote's length —
+    # the run of page words a contiguous selection covers is ~its word count.
+    target = end - (len(qwords) - 1)
+    start = next(
+        (
+            min(cands, key=lambda i: abs(i - target))
+            for q in qwords[:8]
+            if (cands := [i for i, w in enumerate(forms) if w == q and i <= end])
+        ),
+        None,
+    )
+    if start is None or start > end:
+        return None
+    rects = [entries[i][1] for i in range(start, end + 1)]
+    pad = 2.0
+    return fitz.Rect(
+        max(page.rect.x0, min(r.x0 for r in rects) - pad),
+        max(page.rect.y0, min(r.y0 for r in rects) - pad),
+        min(page.rect.x1, max(r.x1 for r in rects) + pad),
+        min(page.rect.y1, max(r.y1 for r in rects) + pad),
+    )
+
+
+def _trim_to_quote(ocr: str, exact: str) -> str:
+    """Trim OCR output back to the annotated span. The crop is full column width, so its
+    last line can run past the selection into the next sentence; cut after the quote's
+    trailing prose, keeping the math before it. A no-op when those words can't be found
+    (e.g. the tail is itself math), which errs toward keeping text rather than dropping it."""
+    qtokens = [t for t in exact.split() if _norm(t)]
+    if len(qtokens) < 3:  # noqa: PLR2004 - too short to anchor a tail
+        return ocr.strip()
+    core = [re.escape(t.strip(".,;:()[]-")) for t in qtokens[-3:]]
+    tail = list(re.finditer(r"\W+".join(core) + r"[.,;:)\]]*", ocr, re.IGNORECASE))
+    if tail:
+        ocr = ocr[: tail[-1].end()]
+    return ocr.strip()
 
 
 def _ocr_latex(png: bytes) -> str:
@@ -110,15 +156,23 @@ def _fetch_pdf(uri: str) -> bytes:
     return _pdf_cache[uri]
 
 
-def clean_pdf_quote(uri: str, page_index: int, prefix: str, suffix: str, exact: str) -> str:
-    """Clean LaTeX for a PDF annotation, by OCR'ing the region it occupies. Returns
-    ``exact`` (the raw text-layer quote) unchanged when the page or region can't be
-    resolved, so a locating miss degrades to honest raw text rather than wrong math."""
+def clean_pdf_quote(
+    uri: str,
+    page_index: int,
+    prefix: str,  # noqa: ARG001 - part of the annotation region request; kept for API stability
+    suffix: str,  # noqa: ARG001
+    exact: str,
+) -> str:
+    """Clean LaTeX for a PDF annotation, by OCR'ing the region it occupies. The region is
+    the bounding box of ``exact`` located from the page's own words (``prefix``/``suffix``
+    are no longer needed to bracket it). Returns ``exact`` (the raw text-layer quote)
+    unchanged when the page or region can't be resolved, so a locating miss degrades to
+    honest raw text rather than wrong math."""
     doc = fitz.open(stream=_fetch_pdf(uri), filetype="pdf")
     if not 0 <= page_index < doc.page_count:
         return exact
-    band = _band(doc[page_index], prefix, suffix)
-    if band is None:
+    rect = _quote_rect(doc[page_index], exact)
+    if rect is None:
         return exact
-    png = doc[page_index].get_pixmap(dpi=_DPI, clip=band).tobytes("png")
-    return _ocr_latex(png) or exact
+    png = doc[page_index].get_pixmap(dpi=_DPI, clip=rect).tobytes("png")
+    return _trim_to_quote(_ocr_latex(png), exact) or exact

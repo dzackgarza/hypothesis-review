@@ -1,11 +1,11 @@
 """Owned-logic tests for the PDF math normalizer.
 
 The OCR itself is Mathpix's correctness, proven out-of-band. What this module owns, and
-what these tests prove, is: detecting that a PDF quote spans math, and locating the
-annotation's region from its prose prefix/suffix so the right slice of the page is what
-gets OCR'd — or, on a locating miss, that the honest raw quote is kept instead of the
-wrong region. Region logic runs against a real PyMuPDF document with text at known
-positions: a real boundary, no network, no OCR call.
+what these tests prove, is: locating the annotation's region as the bounding box of the
+selected text — every line it spans, at the text column's width — so the right slice of
+the page is what gets OCR'd, and trimming the OCR back to the selection. On a locating
+miss, the honest raw quote is kept instead of the wrong region. Region logic runs against
+a real PyMuPDF document with text at known positions: a real boundary, no network, no OCR.
 """
 
 from __future__ import annotations
@@ -31,26 +31,62 @@ def _doc_with_lines(lines: list[tuple[float, str]]) -> fitz.Document:
     return doc
 
 
-def test_band_brackets_exactly_the_region_between_prose_anchors():
+def test_quote_rect_spans_every_line_the_selection_covers():
+    # The bug this guards against: a three-line selection cropped to only its middle line,
+    # dropping the line the math sits on. The box must cover all three.
     doc = _doc_with_lines(
         [
-            (100, "ending the setup paragraph here"),
-            (140, "OMEGA equals the residue integral"),
-            (180, "One has the following corollary"),
+            (100, "The moduli space M of Enriques surfaces is an open subset of a 10-"),
+            (120, "dimensional orthogonal modular variety, which was shown by Kondo"),
+            (140, "to be rational. This description is obtained by considering"),
         ]
     )
     page = doc[0]
-    band = pdfmath._band(page, "ending the setup paragraph here", "One has the following corollary")
-    assert band is not None
-    captured = page.get_textbox(band)
-    assert "residue integral" in captured  # the region the annotation occupies
-    assert "setup paragraph" not in captured  # prefix line excluded
-    assert "corollary" not in captured  # suffix line excluded
+    exact = (
+        "The moduli space M of Enriques surfaces is an open subset of a 10- "
+        "dimensional orthogonal modular variety, which was shown by Kondo "
+        "to be rational."
+    )
+    rect = pdfmath._quote_rect(page, exact)
+    assert rect is not None
+    captured = page.get_textbox(rect)
+    assert "moduli space" in captured  # first line
+    assert "orthogonal modular" in captured  # middle line
+    assert "to be rational" in captured  # last line
 
 
-def test_band_is_none_when_an_anchor_is_absent():
-    page = _doc_with_lines([(100, "only line on the page")])[0]
-    assert pdfmath._band(page, "no such prefix text here", "no such suffix") is None
+def test_quote_rect_starts_at_the_first_occurrence_when_a_leading_word_repeats():
+    # The bug this guards against: the first quote word ("Enriques") recurs near the end of
+    # the selection, and picking its last occurrence collapsed the box to the tail. The box
+    # must start at the true beginning, so the opening line is included.
+    doc = _doc_with_lines(
+        [
+            (100, "Enriques surfaces are quotients of K3 surfaces by involutions."),
+            (120, "They occupy a place between rational and other K3 surfaces. So"),
+            (140, "there are finitely many polarized Enriques surfaces of each kind."),
+        ]
+    )
+    page = doc[0]
+    exact = (
+        "Enriques surfaces are quotients of K3 surfaces by involutions. "
+        "They occupy a place between rational and other K3 surfaces. So "
+        "there are finitely many polarized Enriques surfaces of each kind."
+    )
+    captured = page.get_textbox(pdfmath._quote_rect(page, exact))
+    assert "are quotients" in captured  # opening line kept, not skipped to the late repeat
+
+
+def test_quote_rect_is_none_when_the_selection_is_not_on_the_page():
+    page = _doc_with_lines([(100, "only unrelated prose on the page")])[0]
+    assert pdfmath._quote_rect(page, "text that does not appear here at all") is None
+
+
+def test_trim_to_quote_cuts_trailing_overcapture():
+    # The crop is full column width, so its last line runs past the selection; the trailing
+    # prose of the quote marks where to cut, and the math before it is preserved.
+    exact = "the residue is some finite data attached"
+    ocr = "the residue is \\(\\omega\\) some finite data attached. Unrelated trailing text here."
+    assert pdfmath._trim_to_quote(ocr, exact) == "the residue is \\(\\omega\\) some finite data attached."
 
 
 def test_clean_pdf_quote_keeps_raw_when_page_is_out_of_range():
@@ -64,5 +100,6 @@ def test_clean_pdf_quote_keeps_raw_when_region_cannot_be_located():
     doc = _doc_with_lines([(100, "some unrelated prose")])
     uri = "http://test.invalid/b.pdf"
     pdfmath._pdf_cache[uri] = doc.tobytes()
-    # A prefix that isn't on the page -> no band -> raw quote, never an OCR of the wrong region.
-    assert pdfmath.clean_pdf_quote(uri, 0, "anchor not present", "", "the raw exact quote") == "the raw exact quote"
+    # A quote that isn't on the page -> no region -> raw quote, never an OCR of the wrong slice.
+    quote = "a selection that does not occur on this page"
+    assert pdfmath.clean_pdf_quote(uri, 0, "", "", quote) == quote
