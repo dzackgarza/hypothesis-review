@@ -47,14 +47,6 @@ class HClient:
         )
         resp.raise_for_status()
 
-    def update_text(self, annotation_id: str, text: str) -> None:
-        """Replace an annotation's body (``text``). Used to write recovered LaTeX back so
-        stock Hypothesis renders it natively; ``target`` (anchoring) is left untouched."""
-        resp = self._client.patch(
-            f"/api/annotations/{annotation_id}", json={"text": text}
-        )
-        resp.raise_for_status()
-
     def close(self) -> None:
         self._client.close()
 
