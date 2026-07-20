@@ -1,8 +1,11 @@
 """CLI tests for the recording delivery commands: ``pull`` and ``wait``.
 
-Both record the delivered batch into the git ledger *before* printing it, and bounce
-unless run inside a git repo. They run against the throwaway ``git_repo`` fixture; source
-and client are stubbed via ``ctx.obj``.
+Both record the delivered batch into the git ledger *before* printing it, and bounce unless
+run inside a git repo. A session is a time window: ``pull`` reads the open timestamp parked
+under ``.git/annotate/open_time`` and delivers the real annotations created since it; ``wait``
+parks that timestamp, blocks in ``_park`` until the harness wakes it, then delivers. Tests
+monkeypatch ``_park`` rather than racing a real signal. Source and client are stubbed via
+``ctx.obj``.
 """
 
 import json
@@ -13,11 +16,11 @@ from click.testing import CliRunner
 from conftest import committed_at_head
 
 from annotate.api import HClient
-from annotate.cli import App, main
+from annotate.cli import App, _write_open_time, main
 from annotate.models import Annotation
 
 
-def _ann(id: str, created: int, tags: list[str] | None = None) -> Annotation:
+def _ann(id: str, created: datetime, tags: list[str] | None = None) -> Annotation:
     return Annotation(
         id=id,
         created=created,
@@ -45,18 +48,23 @@ class _StubSource:
 
 
 class _StubClient(HClient):
+    """A do-nothing client: pull/wait never write to h."""
+
     def __init__(self) -> None:
-        self.markers: list[tuple[str, str]] = []
+        self.tagged: list[tuple[str, list[str]]] = []
 
-    def create_marker(self, group_id: str, kind: str) -> str:
-        self.markers.append((group_id, kind))
-        return "marker-1"
+    def tag(self, annotation_id: str, add: list[str]) -> None:
+        self.tagged.append((annotation_id, list(add)))
 
 
-OPEN = _ann("open", 1, ["review:open"])
-A = _ann("a", 2)
-B = _ann("b", 3)
-SEND = _ann("send", 4, ["review:send"])
+OPEN_TIME = datetime(2026, 7, 20, 12, 0, 0)
+BEFORE = _ann("before", datetime(2026, 7, 20, 11, 0, 0))  # created before the session opened
+A = _ann("a", datetime(2026, 7, 20, 12, 0, 1))
+B = _ann("b", datetime(2026, 7, 20, 12, 0, 2))
+# For the wait tests, which park open=now(): PAST is before any real clock, FUTURE after it.
+PAST = _ann("before", datetime(2000, 1, 1, 0, 0, 0))
+FUTURE_A = _ann("a", datetime(2099, 1, 1, 0, 0, 1))
+FUTURE_B = _ann("b", datetime(2099, 1, 1, 0, 0, 2))
 
 
 def _app(anns: list[Annotation], client: HClient | None = None) -> App:
@@ -69,9 +77,10 @@ def _ledger_ids(repo) -> list[str]:
 
 
 def test_pull_records_and_prints_batch(git_repo):
-    result = CliRunner().invoke(main, ["pull"], obj=_app([OPEN, A, B, SEND]))
+    _write_open_time(git_repo, OPEN_TIME)
+    result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
     assert result.exit_code == 0, result.output
-    assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]  # stdout is the batch
+    assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]  # only the post-open ones
     assert _ledger_ids(git_repo) == ["a", "b"]  # recorded to the default ledger
     assert "feedback/ledger.jsonl" in committed_at_head(git_repo)  # committed
     assert "recorded 2 new" in result.stderr  # audit log to stderr
@@ -80,16 +89,17 @@ def test_pull_records_and_prints_batch(git_repo):
 
 def test_pull_bounces_when_not_in_a_git_repo(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # a bare dir, not a git repo
-    result = CliRunner().invoke(main, ["pull"], obj=_app([OPEN, A, B, SEND]))
+    result = CliRunner().invoke(main, ["pull"], obj=_app([A, B]))
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr
 
 
 def test_pull_dedups_on_a_second_call(git_repo):
+    _write_open_time(git_repo, OPEN_TIME)
     runner = CliRunner()
-    runner.invoke(main, ["pull"], obj=_app([OPEN, A, B, SEND]))
+    runner.invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
     head_after_first = committed_at_head(git_repo)
-    result = runner.invoke(main, ["pull"], obj=_app([OPEN, A, B, SEND]))
+    result = runner.invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
     assert result.exit_code == 0, result.output
     assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]  # still delivered
     assert _ledger_ids(git_repo) == ["a", "b"]  # not duplicated
@@ -98,8 +108,9 @@ def test_pull_dedups_on_a_second_call(git_repo):
 
 
 def test_pull_records_to_named_path(git_repo):
+    _write_open_time(git_repo, OPEN_TIME)
     result = CliRunner().invoke(
-        main, ["pull", "--path", "research-intake.jsonl"], obj=_app([OPEN, A, B, SEND])
+        main, ["pull", "--path", "research-intake.jsonl"], obj=_app([A, B])
     )
     assert result.exit_code == 0, result.output
     assert (git_repo / "research-intake.jsonl").exists()
@@ -107,26 +118,37 @@ def test_pull_records_to_named_path(git_repo):
     assert "default ledger" not in result.stderr  # a name was supplied
 
 
-def test_pull_empty_when_session_opened_but_not_sent(git_repo):
-    result = CliRunner().invoke(main, ["pull"], obj=_app([OPEN, A, B]))
+def test_pull_empty_when_no_session_is_open(git_repo):
+    result = CliRunner().invoke(main, ["pull"], obj=_app([A, B]))  # no open_time parked
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
     assert _ledger_ids(git_repo) == []  # nothing to record
 
 
-def test_wait_opens_marker_then_records_and_prints_batch(git_repo):
+def test_wait_parks_open_time_then_records_and_prints_batch(git_repo, monkeypatch):
+    monkeypatch.setattr("annotate.cli._park", lambda timeout: True)  # harness woke us
     client = _StubClient()
-    result = CliRunner().invoke(main, ["wait"], obj=_app([OPEN, A, B, SEND], client=client))
+    result = CliRunner().invoke(main, ["wait"], obj=_app([PAST, FUTURE_A, FUTURE_B], client=client))
     assert result.exit_code == 0, result.output
     assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]
-    assert client.markers == [("grp", "review:open")]  # exactly one open marker
+    assert (git_repo / ".git" / "annotate" / "open_time").exists()  # open time parked locally
+    assert client.tagged == []  # wait makes no h write
     assert _ledger_ids(git_repo) == ["a", "b"]  # batch recorded
 
 
-def test_wait_bounces_before_opening_a_marker_outside_a_repo(tmp_path, monkeypatch):
+def test_wait_times_out_without_a_wake(git_repo, monkeypatch):
+    monkeypatch.setattr("annotate.cli._park", lambda timeout: False)  # nobody woke us
+    result = CliRunner().invoke(main, ["wait", "--timeout", "1"], obj=_app([FUTURE_A, FUTURE_B]))
+    assert result.exit_code != 0
+    assert "timed out" in result.stderr
+    assert _ledger_ids(git_repo) == []  # nothing delivered on timeout
+
+
+def test_wait_bounces_before_parking_outside_a_repo(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    client = _StubClient()
-    result = CliRunner().invoke(main, ["wait"], obj=_app([OPEN, A, B, SEND], client=client))
+    parked = []
+    monkeypatch.setattr("annotate.cli._park", lambda timeout: parked.append(True) or True)
+    result = CliRunner().invoke(main, ["wait"], obj=_app([FUTURE_A, FUTURE_B]))
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr
-    assert client.markers == []  # never opened a session it could not record
+    assert parked == []  # never parked a session it could not record

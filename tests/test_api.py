@@ -1,11 +1,16 @@
 """Real-boundary tests for :class:`HClient`.
 
-HClient's job is to talk to the live h API correctly: create markers and merge tags.
-A mocked transport accepts any request, so it cannot catch a wrong endpoint, a
-malformed body, or a bad id format -- which is exactly how the uuid-vs-public-id bug
-reached the tag path. These drive the live API and read the result back through
-Postgres, then clean up. They require the live h stack (the tool's real boundary), so
-its absence fails loudly rather than skipping.
+HClient's one job is to talk to the live h API correctly: merge the ``acted`` tag onto a
+resolved annotation. A mocked transport accepts any request, so it cannot catch a wrong
+endpoint, a malformed body, or a bad id format -- which is exactly how the uuid-vs-public-id
+bug reached the tag path. This drives the live API and reads the result back through
+Postgres, then cleans up. It requires the live h stack (the tool's real boundary), so its
+absence fails loudly rather than skipping.
+
+Seeds go through the real create path, which now normalizes the quote synchronously at
+intake and rejects any quote-less create. So the seeded annotation carries a
+``TextQuoteSelector`` whose ``exact`` spans a ``<span class="math">`` on the frameworkmath
+render-test page: h recovers its LaTeX from the page source (no Mathpix) and returns 200.
 """
 
 from __future__ import annotations
@@ -18,17 +23,33 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from annotate.api import MARKER_URI, HClient
+from annotate.api import HClient
 from annotate.config import Config
+
+# A recoverable selection on the frameworkmath page: the flattened MathJax capture of the
+# inline math span, which h's Node/KaTeX extractor maps back to authored LaTeX at intake.
+FRAMEWORK_URL = "http://localhost:3012/document/frameworkmath"
+RECOVERABLE_EXACT = "and ιB:C.B→C their intersection"
 
 
 def _seed(cfg: Config, tags: list[str]) -> str:
-    """Create an annotation via the live API; return its h public id."""
-    uri = f"http://example.test/{uuid.uuid4().hex}"
+    """Create an annotation via the live API; return its h public id. Carries a recoverable
+    math quote so the synchronous intake normalization accepts it (200)."""
     resp = httpx.post(
         f"{cfg.api_url}/api/annotations",
         headers={"Authorization": f"Bearer {cfg.token}"},
-        json={"uri": uri, "text": "note", "tags": tags, "group": cfg.group_id},
+        json={
+            "uri": FRAMEWORK_URL,
+            "text": "note",
+            "tags": tags,
+            "group": cfg.group_id,
+            "target": [
+                {
+                    "source": FRAMEWORK_URL,
+                    "selector": [{"type": "TextQuoteSelector", "exact": RECOVERABLE_EXACT}],
+                }
+            ],
+        },
     )
     resp.raise_for_status()
     return resp.json()["id"]
@@ -53,19 +74,6 @@ def run() -> Any:
     with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM annotation WHERE tags @> ARRAY[%s]::text[]", (tag,))
         conn.commit()
-
-
-@pytest.mark.pg
-def test_create_marker_lands_in_group_tagged_with_its_kind(run: Any) -> None:
-    cfg, kind = run  # the marker "kind" doubles as this run's cleanup tag
-    new_id = HClient(cfg.api_url, cfg.token).create_marker(cfg.group_id, kind)
-
-    assert new_id  # server assigned a public id
-    rows = _rows_for_tag(cfg.pg_dsn, kind)
-    assert len(rows) == 1
-    assert rows[0]["target_uri"] == MARKER_URI  # markers anchor on the synthetic uri
-    assert rows[0]["groupid"] == cfg.group_id
-    assert rows[0]["tags"] == [kind]
 
 
 @pytest.mark.pg

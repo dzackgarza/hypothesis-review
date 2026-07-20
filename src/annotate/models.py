@@ -1,10 +1,10 @@
 """annotate data models.
 
-A *marker* is just an :class:`Annotation` carrying a ``review:open`` /
-``review:send`` tag (see :meth:`Annotation.is_marker`); there is no separate
-Marker type. A :class:`Batch` is the annotation window between an open and a
-send marker. A :class:`LedgerEntry` is one git-anchored, JSON-serializable line
-of the reviewed repo's JSONL ledger.
+A review batch is just a ``list[Annotation]`` -- the real annotations created since a
+session's open timestamp (see :func:`annotate.session.batch_since`). :meth:`Annotation.is_marker`
+still recognizes the ``acted`` tag (and any leftover legacy session-marker rows). A
+:class:`LedgerEntry` is one git-anchored, JSON-serializable line of the reviewed repo's JSONL
+ledger.
 """
 
 from __future__ import annotations
@@ -93,13 +93,6 @@ class Annotation:
             quote_suffix=tq.get("suffix", ""),
             page_index=_page_index_of(row["target_selectors"]),
         )
-
-
-@dataclass(frozen=True)
-class Batch:
-    open_marker: Annotation
-    send_marker: Annotation
-    annotations: list[Annotation]
 
 
 @dataclass(frozen=True)

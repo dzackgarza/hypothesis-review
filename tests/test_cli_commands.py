@@ -46,15 +46,10 @@ class _StubSource:
 
 
 class _StubClient(HClient):
-    """Records marker/tag writes without opening an httpx client."""
+    """Records ``acted`` tag writes without opening an httpx client."""
 
     def __init__(self):
-        self.markers: list[tuple[str, str]] = []
         self.tagged: list[tuple[str, list[str]]] = []
-
-    def create_marker(self, group_id: str, kind: str) -> str:
-        self.markers.append((group_id, kind))
-        return "m1"
 
     def tag(self, annotation_id: str, add: list[str]) -> None:
         self.tagged.append((annotation_id, list(add)))
@@ -118,9 +113,14 @@ def test_record_bounces_outside_a_git_repo(tmp_path, monkeypatch):
     assert "not inside a git repository" in result.stderr
 
 
-def test_resolve_tags_each_batch_member_acted():
+def test_resolve_tags_each_batch_member_acted(git_repo):
+    from annotate.cli import _write_open_time
+
+    _write_open_time(git_repo, datetime(2026, 7, 20, 12, 0, 0))
+    ra = _ann("a", datetime(2026, 7, 20, 12, 0, 1))
+    rb = _ann("b", datetime(2026, 7, 20, 12, 0, 2))
     client = _StubClient()
-    result = CliRunner().invoke(main, ["resolve"], obj=_app([OPEN_M, A, B, SEND_M], client=client))
+    result = CliRunner().invoke(main, ["resolve"], obj=_app([ra, rb], client=client))
     assert result.exit_code == 0, result.output
     assert client.tagged == [("a", ["acted"]), ("b", ["acted"])]
 

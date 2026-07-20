@@ -3,9 +3,10 @@
 The tool forces one thing: every batch of feedback an agent receives is recorded in a
 git-tracked ledger. ``wait`` and ``pull`` record-then-print (they bounce unless run inside
 a git repo — there is no unrecorded mode); ``slice`` is a read-only ad-hoc view that points
-at ``record``; ``record`` appends chosen annotations. Reads go through
-:mod:`annotate.source`, marker writes through :mod:`annotate.api`; both are injected via the
-click context object so tests swap in stubs.
+at ``record``; ``record`` appends chosen annotations. A session is a time window: ``wait``
+parks the open timestamp locally and delivers the annotations created since it. Reads go
+through :mod:`annotate.source`, the ``acted`` write through :mod:`annotate.api`; both are
+injected via the click context object so tests swap in stubs.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import json
 import os
 import pathlib
 import re
-import time
+import signal
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -34,12 +35,14 @@ from annotate.ledger import (
     track as ledger_track,
 )
 from annotate.mathquote import clean_quote, has_math
-from annotate.models import Annotation, Batch, LedgerEntry
+from annotate.models import Annotation, LedgerEntry
 from annotate.pdfmath import clean_pdf_quote, pdf_has_math
-from annotate.session import ACTED, OPEN, SEND, NoSend, batch_for, latest_open
+from annotate.session import ACTED, OPEN, SEND, batch_since
 from annotate.source import AnnotationSource, PostgresSource
 
-POLL_SECONDS = 2
+#: Where a session's open timestamp is parked, inside the repo's untracked ``.git`` dir so it
+#: isolates per-repo (and per test tmp-repo) and ``pull``/``resolve`` can read it back.
+OPEN_TIME_REL = pathlib.Path(".git") / "annotate" / "open_time"
 
 
 @dataclasses.dataclass
@@ -52,17 +55,45 @@ class App:
     cfg: Config = dataclasses.field(default_factory=Config)
 
 
-def _current_batch(source: AnnotationSource, group_id: str) -> Batch | None:
-    """The sent batch of the latest open session, or ``None`` when there is no
-    open marker or the session has not been sent yet."""
-    anns = source.list(group_id)
-    open_marker = latest_open(anns)
-    if open_marker is None:
+def _open_time_path(root: pathlib.Path) -> pathlib.Path:
+    return root / OPEN_TIME_REL
+
+
+def _write_open_time(root: pathlib.Path, when: datetime) -> None:
+    """Record a session's open timestamp under the repo's ``.git`` dir (ISO 8601)."""
+    path = _open_time_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(when.isoformat(), encoding="utf-8")
+
+
+def _read_open_time(root: pathlib.Path) -> datetime | None:
+    """The parked session open timestamp, or ``None`` if no session has been opened."""
+    path = _open_time_path(root)
+    if not path.exists():
         return None
-    try:
-        return batch_for(anns, open_marker)
-    except NoSend:
-        return None
+    return datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+
+
+def _park(timeout: int) -> bool:
+    """Block until the harness wakes us with ``SIGUSR1``, or ``timeout`` seconds elapse.
+
+    Returns ``True`` when woken (deliver the batch) and ``False`` on timeout. SIGUSR1 is
+    blocked first so the wake is caught by ``sigtimedwait`` rather than running its default
+    action (terminate). Module-level so tests can monkeypatch it instead of racing a real signal.
+    """
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+    return signal.sigtimedwait({signal.SIGUSR1}, timeout) is not None
+
+
+def _current_batch(
+    source: AnnotationSource, group_id: str, root: pathlib.Path
+) -> list[Annotation]:
+    """The real annotations created since this repo's open session started, or ``[]`` when no
+    session is open."""
+    since = _read_open_time(root)
+    if since is None:
+        return []
+    return batch_since(source.list(group_id), since)
 
 
 def _anns_json(anns: list[Annotation]) -> str:
@@ -160,10 +191,11 @@ def _deliver(anns: list[Annotation], rel_path: str | None) -> None:
 def main(ctx: click.Context) -> None:
     """Git-anchored review loop over self-hosted Hypothesis annotations.
 
-    Workflow: `wait` opens a review session and blocks until you press Send in the browser;
-    it records the whole batch of annotations to a git-tracked ledger and prints it. You act
-    on the feedback, then `resolve` tags it done. `slice` browses annotations made outside a
-    session and `record` preserves the ones worth keeping.
+    Workflow: `wait` opens a review session (records the open timestamp locally) and blocks
+    until the harness wakes it; it then records the batch of annotations created during the
+    window to a git-tracked ledger and prints it. You act on the feedback, then `resolve`
+    tags it done. `slice` browses annotations made outside a session and `record` preserves
+    the ones worth keeping.
 
     Recording is not optional: every command that hands feedback to an agent writes it to the
     ledger (default feedback/ledger.jsonl at the repo root) and commits it first, and refuses
@@ -185,8 +217,8 @@ def main(ctx: click.Context) -> None:
 @click.pass_obj
 def pull(app: App, rel_path: str | None) -> None:
     """Record and print the current open session's batch as JSON (or `[]`)."""
-    batch = _current_batch(app.source, app.group_id)
-    _deliver(batch.annotations if batch else [], rel_path)
+    root = _require_repo()
+    _deliver(_current_batch(app.source, app.group_id, root), rel_path)
 
 
 @main.command()
@@ -194,25 +226,25 @@ def pull(app: App, rel_path: str | None) -> None:
     "--timeout",
     default=300,
     show_default=True,
-    help="Max seconds to wait for the review:send marker.",
+    help="Max seconds to wait for the harness wake (SIGUSR1) before giving up.",
 )
 @_ledger_path_option
 @click.pass_obj
 def wait(app: App, timeout: int, rel_path: str | None) -> None:
-    """Open a session, wait for Send, then record and print the batch JSON."""
-    _require_repo()  # bounce before opening a session whose batch we could not record
-    app.client.create_marker(app.group_id, OPEN)
-    for _ in range(max(1, timeout // POLL_SECONDS)):
-        batch = _current_batch(app.source, app.group_id)
-        if batch is not None:
-            _deliver(batch.annotations, rel_path)
-            return
-        time.sleep(POLL_SECONDS)  # ponytail: fixed 2s poll; make it a flag if DB load matters
-    raise click.ClickException(f"timed out after {timeout}s waiting for {SEND!r}")
+    """Open a session, block until the harness wakes us, then record and print the batch JSON.
+
+    Records the open timestamp locally (no h write), parks until ``SIGUSR1`` arrives, then
+    delivers the real annotations created during the window.
+    """
+    root = _require_repo()  # bounce before opening a session whose batch we could not record
+    _write_open_time(root, datetime.now())
+    if not _park(timeout):
+        raise click.ClickException(f"timed out after {timeout}s waiting for the harness wake")
+    _deliver(_current_batch(app.source, app.group_id, root), rel_path)
 
 
 def _not_marker(ann: Annotation) -> bool:
-    """A real annotation: not a ``review:open``/``review:send`` session marker."""
+    """A real annotation: not a leftover ``review:open``/``review:send`` legacy session marker."""
     return not (ann.is_marker(OPEN) or ann.is_marker(SEND))
 
 
@@ -300,8 +332,8 @@ def record(app: App, rel_path: str | None, annotation_ids: tuple[str, ...]) -> N
 @click.pass_obj
 def resolve(app: App) -> None:
     """Tag the current batch's annotations `acted` via the h API."""
-    batch = _current_batch(app.source, app.group_id)
-    anns = batch.annotations if batch else []
+    root = _require_repo()
+    anns = _current_batch(app.source, app.group_id, root)
     for ann in anns:
         app.client.tag(ann.id, [ACTED])
     click.echo(f"tagged {len(anns)} annotation(s) {ACTED!r}")

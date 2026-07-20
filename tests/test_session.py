@@ -1,10 +1,10 @@
-import pytest
+from datetime import datetime
 
 from annotate.models import Annotation
-from annotate.session import NoSend, batch_for, latest_open
+from annotate.session import batch_since
 
 
-def _ann(id: str, created: int, tags: list[str] | None = None) -> Annotation:
+def _ann(id: str, created: datetime, tags: list[str] | None = None) -> Annotation:
     return Annotation(
         id=id,
         created=created,
@@ -16,33 +16,27 @@ def _ann(id: str, created: int, tags: list[str] | None = None) -> Annotation:
     )
 
 
-OPEN = _ann("open", 1, ["review:open"])
-A = _ann("a", 2)  # paperA
-B = _ann("b", 3)  # paperB
-SEND = _ann("send", 4, ["review:send"])
-C = _ann("c", 5)  # post-send
+T0 = datetime(2026, 7, 20, 12, 0, 0)  # session open time
+BEFORE = _ann("before", datetime(2026, 7, 20, 11, 0, 0))
+A = _ann("a", datetime(2026, 7, 20, 12, 0, 1))
+B = _ann("b", datetime(2026, 7, 20, 12, 0, 2))
 
 
-def test_batch_for_windows_between_open_and_send():
-    anns = [OPEN, A, B, SEND, C]
-    batch = batch_for(anns, OPEN)
-    assert batch.annotations == [A, B]  # cross-page, excludes markers and post-send c
-    assert batch.open_marker is OPEN
-    assert batch.send_marker is SEND
+def test_batch_since_returns_reals_created_after_open():
+    assert batch_since([BEFORE, A, B], T0) == [A, B]  # excludes the pre-open annotation
 
 
-def test_batch_for_excludes_acted():
-    acted = _ann("acted-one", 2, ["acted"])
-    anns = [OPEN, acted, B, SEND]
-    assert batch_for(anns, OPEN).annotations == [B]
+def test_batch_since_excludes_acted():
+    acted = _ann("acted-one", datetime(2026, 7, 20, 12, 0, 1), ["acted"])
+    assert batch_since([acted, B], T0) == [B]
 
 
-def test_batch_for_raises_nosend_when_no_send_yet():
-    with pytest.raises(NoSend):
-        batch_for([OPEN, A, B], OPEN)
+def test_batch_since_excludes_legacy_markers():
+    open_marker = _ann("open", datetime(2026, 7, 20, 12, 0, 1), ["review:open"])
+    send_marker = _ann("send", datetime(2026, 7, 20, 12, 0, 3), ["review:send"])
+    assert batch_since([open_marker, A, B, send_marker], T0) == [A, B]
 
 
-def test_latest_open_returns_last_open_or_none():
-    later_open = _ann("open2", 6, ["review:open"])
-    assert latest_open([OPEN, A, SEND, later_open]) is later_open
-    assert latest_open([A, B]) is None
+def test_batch_since_is_exclusive_at_the_open_instant():
+    at_open = _ann("at-open", T0)  # created == since is not "after"
+    assert batch_since([at_open, A], T0) == [A]

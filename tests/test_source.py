@@ -8,6 +8,11 @@ catch). So each test seeds annotations through the **live h API** (the same path
 browser extension uses — an independent oracle for how h populates the columns), then
 reads them back through Postgres and asserts the mapping.
 
+The live create now normalizes the quote synchronously at intake and rejects any quote-less
+create, so every seed carries a ``TextQuoteSelector`` whose ``exact`` spans a
+``<span class="math">`` on the frameworkmath render-test page: h recovers the LaTeX from the
+page source (no Mathpix) and returns 200.
+
 These require the live h stack (API + Postgres), which is the tool's real boundary:
 if it is absent the tool cannot function, so the tests fail loudly rather than skip.
 """
@@ -24,17 +29,38 @@ import pytest
 from annotate.config import Config
 from annotate.source import PostgresSource
 
+FRAMEWORK_URL = "http://localhost:3012/document/frameworkmath"
+# Two distinct recoverable selections on the frameworkmath page (flattened MathJax captures
+# that h's Node/KaTeX extractor maps back to authored LaTeX at intake).
+EXACT_1 = "and ιB:C.B→C their intersection"
+EXACT_2 = "pullback in Cat"
 
-def _seed(cfg: Config, uri: str, text: str, tags: list[str], selectors: Any = None) -> str:
-    """Create one annotation via the real h API (as the extension does); return the
-    h public (API) id the server assigned — the id downstream API calls must use."""
-    payload: dict[str, Any] = {"uri": uri, "text": text, "tags": tags, "group": cfg.group_id}
-    if selectors is not None:
-        payload["target"] = [{"source": uri, "selector": selectors}]
+
+def _seed(
+    cfg: Config,
+    text: str,
+    tags: list[str],
+    exact: str,
+    prefix: str | None = None,
+    suffix: str | None = None,
+) -> str:
+    """Create one annotation via the real h API (as the extension does) with a recoverable
+    math quote; return the h public (API) id the server assigned."""
+    selector: dict[str, Any] = {"type": "TextQuoteSelector", "exact": exact}
+    if prefix is not None:
+        selector["prefix"] = prefix
+    if suffix is not None:
+        selector["suffix"] = suffix
     resp = httpx.post(
         f"{cfg.api_url}/api/annotations",
         headers={"Authorization": f"Bearer {cfg.token}"},
-        json=payload,
+        json={
+            "uri": FRAMEWORK_URL,
+            "text": text,
+            "tags": tags,
+            "group": cfg.group_id,
+            "target": [{"source": FRAMEWORK_URL, "selector": [selector]}],
+        },
     )
     resp.raise_for_status()
     return resp.json()["id"]
@@ -42,15 +68,14 @@ def _seed(cfg: Config, uri: str, text: str, tags: list[str], selectors: Any = No
 
 @pytest.fixture
 def seeded() -> Any:
-    """Two annotations in creation order in the configured group, tagged with a
-    per-run unique marker for isolation; hard-deleted from Postgres afterward."""
+    """Two annotations in creation order in the configured group, each carrying a distinct
+    recoverable math quote, tagged with a per-run unique marker for isolation; hard-deleted
+    from Postgres afterward."""
     cfg = Config.load()
     tag = f"__annotate_it_{uuid.uuid4().hex}"
-    page = f"http://example.test/{uuid.uuid4().hex}"
-    quote = [{"type": "TextQuoteSelector", "exact": "hello world"}]
-    id1 = _seed(cfg, page, "first note", [tag], selectors=quote)
-    id2 = _seed(cfg, page, "second note", [tag])  # no selectors -> target_selectors defaults to []
-    yield cfg, tag, page, [id1, id2]
+    id1 = _seed(cfg, "first note", [tag], EXACT_1)
+    id2 = _seed(cfg, "second note", [tag], EXACT_2)
+    yield cfg, tag, FRAMEWORK_URL, [id1, id2]
     with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM annotation WHERE tags @> ARRAY[%s]::text[]", (tag,))
         conn.commit()
@@ -68,14 +93,17 @@ def test_list_maps_real_columns_in_created_order(seeded: Any) -> None:
 
     assert [a.text for a in rows] == ["first note", "second note"]  # ORDER BY created
     assert [a.id for a in rows] == api_ids  # uuid column -> h public (API) id
-    assert rows[0].quote == "hello world"  # TextQuoteSelector.exact -> quote
+    assert rows[0].quote == EXACT_1  # TextQuoteSelector.exact -> quote (stored verbatim)
+    assert rows[1].quote == EXACT_2
     assert all(a.uri == page for a in rows)  # target_uri -> uri
     assert all(a.group == cfg.group_id for a in rows)  # groupid -> group
     # target_selectors -> reconstructed h API target shape (what _exact_quotes consumes)
     assert rows[0].target == [
-        {"source": page, "selector": [{"type": "TextQuoteSelector", "exact": "hello world"}]}
+        {"source": page, "selector": [{"type": "TextQuoteSelector", "exact": EXACT_1}]}
     ]
-    assert rows[1].target == [{"source": page, "selector": []}]
+    assert rows[1].target == [
+        {"source": page, "selector": [{"type": "TextQuoteSelector", "exact": EXACT_2}]}
+    ]
 
 
 @pytest.mark.pg
@@ -91,19 +119,19 @@ def test_list_since_is_exclusive_and_until_is_inclusive(seeded: Any) -> None:
 
 
 @pytest.fixture
-def seeded_pdf() -> Any:
-    """One PDF-shaped annotation: a TextQuoteSelector carrying prefix/suffix plus a
-    PageSelector — the exact selector shape Hypothesis stores for a PDF highlight, which
-    the PDF math path needs to locate the equation's region. Hard-deleted afterward."""
+def seeded_with_prose_context() -> Any:
+    """One annotation whose TextQuoteSelector carries prefix/suffix prose anchors alongside the
+    recoverable exact — the surrounding context h stores for anchoring. Hard-deleted afterward."""
     cfg = Config.load()
     tag = f"__annotate_it_{uuid.uuid4().hex}"
-    page = f"http://example.test/{uuid.uuid4().hex}.pdf"
-    selectors = [
-        {"type": "TextQuoteSelector", "exact": "the flattened equation",
-         "prefix": "the 2-form is given by ", "suffix": " One has the following"},
-        {"type": "PageSelector", "index": 3, "label": "4"},
-    ]
-    _seed(cfg, page, "pdf note", [tag], selectors=selectors)
+    _seed(
+        cfg,
+        "context note",
+        [tag],
+        EXACT_1,
+        prefix="For classifiers ",
+        suffix=" is the pullback",
+    )
     yield cfg, tag
     with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM annotation WHERE tags @> ARRAY[%s]::text[]", (tag,))
@@ -111,11 +139,11 @@ def seeded_pdf() -> Any:
 
 
 @pytest.mark.pg
-def test_from_pg_row_surfaces_pdf_page_and_prose_context(seeded_pdf: Any) -> None:
-    cfg, tag = seeded_pdf
+def test_from_pg_row_surfaces_prose_context(seeded_with_prose_context: Any) -> None:
+    cfg, tag = seeded_with_prose_context
     [row] = _run_rows(cfg, tag)
-    assert row.page_index == 3  # PageSelector.index -> the page to render and OCR
-    assert row.quote == "the flattened equation"
-    # prefix/suffix are the prose anchors that bracket the equation's region on the page
-    assert row.quote_prefix == "the 2-form is given by "
-    assert row.quote_suffix == " One has the following"
+    assert row.quote == EXACT_1
+    # prefix/suffix are the prose anchors h stores around the selection, surfaced for the CLI.
+    assert row.quote_prefix == "For classifiers "
+    assert row.quote_suffix == " is the pullback"
+    assert row.page_index is None  # a non-paginated (HTML) document has no PageSelector

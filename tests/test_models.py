@@ -3,9 +3,9 @@
 ``from_pg_row`` is deliberately NOT unit-tested against a hand-built row: a synthetic
 row encodes an assumption about the h schema, and if that assumption is wrong the test
 passes while the real query fails (which is precisely the bug that shipped). The
-column mapping is proved against real rows in ``test_source.py``. Marker semantics are
-proved through ``batch_for``/``latest_open`` in ``test_session.py``. What remains here
-is the ledger's own serialization contract.
+column mapping is proved against real rows in ``test_source.py``. Time-window batching is
+proved through ``batch_since`` in ``test_session.py``. What remains here is the ledger's
+own serialization contract.
 """
 
 from annotate.models import LedgerEntry

@@ -1,8 +1,7 @@
-"""h HTTP API client for writes (session markers + ``acted`` tagging).
+"""h HTTP API client for writes (``acted`` tagging).
 
 Reads go through Postgres (``source.py``); only writes use the h HTTP API with a
-developer token. Markers are annotations anchored on a synthetic URI so they
-never collide with real page annotations.
+developer token. The one write is merging the ``acted`` tag onto a resolved annotation.
 """
 
 from __future__ import annotations
@@ -10,8 +9,6 @@ from __future__ import annotations
 from types import TracebackType
 
 import httpx
-
-MARKER_URI = "urn:annotate:marker"
 
 
 class HClient:
@@ -27,14 +24,6 @@ class HClient:
             headers={"Authorization": f"Bearer {token}"},
             transport=transport,
         )
-
-    def create_marker(self, group_id: str, kind: str) -> str:
-        resp = self._client.post(
-            "/api/annotations",
-            json={"uri": MARKER_URI, "group": group_id, "text": kind, "tags": [kind]},
-        )
-        resp.raise_for_status()
-        return resp.json()["id"]
 
     def tag(self, annotation_id: str, add: list[str]) -> None:
         # h PATCH replaces the tags field, so merge against the current tags.
