@@ -19,6 +19,8 @@ if it is absent the tool cannot function, so the tests fail loudly rather than s
 
 from __future__ import annotations
 
+import json
+import pathlib
 import uuid
 from typing import Any
 
@@ -27,7 +29,14 @@ import psycopg
 import pytest
 
 from annotate.config import Config
+from annotate.models import Annotation
 from annotate.source import PostgresSource
+
+#: A real PDF annotation row captured from the live h database (arXiv PDF highlight, its
+#: PageSelector/TextQuoteSelector intact). Used for the PageSelector->page_index mapping,
+#: which cannot be live-seeded: the synchronous fail-hard normalization routes any PDF
+#: create through Mathpix OCR, so seeding a PDF highlight needs a real math PDF + a key.
+PDF_ROW_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "pdf_annotation_row.json"
 
 FRAMEWORK_URL = "http://localhost:3012/document/frameworkmath"
 # Two distinct recoverable selections on the frameworkmath page (flattened MathJax captures
@@ -147,3 +156,21 @@ def test_from_pg_row_surfaces_prose_context(seeded_with_prose_context: Any) -> N
     assert row.quote_prefix == "For classifiers "
     assert row.quote_suffix == " is the pullback"
     assert row.page_index is None  # a non-paginated (HTML) document has no PageSelector
+
+
+def test_from_pg_row_maps_page_index_from_a_real_pdf_row() -> None:
+    """A PDF highlight's ``PageSelector.index`` maps to ``Annotation.page_index`` -- the field
+    that routes an annotation to the PDF OCR path. This is the one mapping the live seeds above
+    cannot cover: the new fail-hard normalization sends every PDF create through Mathpix, so a
+    PDF highlight cannot be seeded in the commit gate. It is proved against a row CAPTURED from
+    the real h database (``fixtures/pdf_annotation_row.json``), not a hand-built dict -- the
+    captured row is the exact schema h wrote, so it cannot pass on a wrong-shape assumption the
+    way a synthetic row would, while the live HTML seeds keep catching ongoing schema drift.
+    """
+    ann = Annotation.from_pg_row(json.loads(PDF_ROW_FIXTURE.read_text()))
+    assert ann.page_index == 1  # PageSelector.index
+    assert ann.uri == "https://arxiv.org/pdf/2312.03638"
+    assert ann.quote.startswith("Theorem 1.1.")
+    assert ann.quote_prefix == ". ZACK GARZA, AND LUCA SCHAFFLER "
+    assert ann.quote_suffix == "In Sections 6, 7 we describe all"
+    assert ann.text == "Looks good."
