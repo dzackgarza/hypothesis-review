@@ -95,6 +95,21 @@ def _run_rows(cfg: Config, tag: str, **kw: Any) -> list:
     return [a for a in PostgresSource(cfg.pg_dsn).list(cfg.group_id, **kw) if tag in a.tags]
 
 
+def _normalized_quotes(cfg: Config, tag: str) -> list[str]:
+    """Backend-owned normalized values for this run, in annotation creation order."""
+    with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT normalized.normalized_quote "
+            "FROM annotation "
+            "JOIN annotation_normalized AS normalized "
+            "ON normalized.annotation_id = annotation.id "
+            "WHERE annotation.tags @> ARRAY[%s]::text[] "
+            "ORDER BY annotation.created",
+            (tag,),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
 @pytest.mark.pg
 def test_list_maps_real_columns_in_created_order(seeded: Any) -> None:
     cfg, tag, page, api_ids = seeded
@@ -102,8 +117,9 @@ def test_list_maps_real_columns_in_created_order(seeded: Any) -> None:
 
     assert [a.text for a in rows] == ["first note", "second note"]  # ORDER BY created
     assert [a.id for a in rows] == api_ids  # uuid column -> h public (API) id
-    assert rows[0].quote == EXACT_1  # TextQuoteSelector.exact -> quote (stored verbatim)
-    assert rows[1].quote == EXACT_2
+    assert [row.quote for row in rows] == _normalized_quotes(cfg, tag)
+    # The source consumes h's recovered LaTeX, not the flattened selector text.
+    assert [row.quote for row in rows] != [EXACT_1, EXACT_2]
     assert all(a.uri == page for a in rows)  # target_uri -> uri
     assert all(a.group == cfg.group_id for a in rows)  # groupid -> group
     # target_selectors -> reconstructed h API target shape (what _exact_quotes consumes)
