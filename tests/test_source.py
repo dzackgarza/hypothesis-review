@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import pathlib
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -72,11 +73,13 @@ def _seed(
         },
     )
     resp.raise_for_status()
-    return resp.json()["id"]
+    annotation_id = resp.json()["id"]
+    assert isinstance(annotation_id, str)
+    return annotation_id
 
 
 @pytest.fixture
-def seeded() -> Any:
+def seeded() -> Iterator[tuple[Config, str, str, list[str]]]:
     """Two annotations in creation order in the configured group, each carrying a distinct
     recoverable math quote, tagged with a per-run unique marker for isolation; hard-deleted
     from Postgres afterward."""
@@ -90,7 +93,7 @@ def seeded() -> Any:
         conn.commit()
 
 
-def _run_rows(cfg: Config, tag: str, **kw: Any) -> list:
+def _run_rows(cfg: Config, tag: str, **kw: Any) -> list[Annotation]:
     """PostgresSource rows in the configured group carrying this run's tag."""
     return [a for a in PostgresSource(cfg.pg_dsn).list(cfg.group_id, **kw) if tag in a.tags]
 
@@ -123,12 +126,8 @@ def test_list_maps_real_columns_in_created_order(seeded: Any) -> None:
     assert all(a.uri == page for a in rows)  # target_uri -> uri
     assert all(a.group == cfg.group_id for a in rows)  # groupid -> group
     # target_selectors -> reconstructed h API target shape (what _exact_quotes consumes)
-    assert rows[0].target == [
-        {"source": page, "selector": [{"type": "TextQuoteSelector", "exact": EXACT_1}]}
-    ]
-    assert rows[1].target == [
-        {"source": page, "selector": [{"type": "TextQuoteSelector", "exact": EXACT_2}]}
-    ]
+    assert rows[0].target == [{"source": page, "selector": [{"type": "TextQuoteSelector", "exact": EXACT_1}]}]
+    assert rows[1].target == [{"source": page, "selector": [{"type": "TextQuoteSelector", "exact": EXACT_2}]}]
 
 
 @pytest.mark.pg
@@ -144,7 +143,7 @@ def test_list_since_is_exclusive_and_until_is_inclusive(seeded: Any) -> None:
 
 
 @pytest.fixture
-def seeded_with_prose_context() -> Any:
+def seeded_with_prose_context() -> Iterator[tuple[Config, str]]:
     """One annotation whose TextQuoteSelector carries prefix/suffix prose anchors alongside the
     recoverable exact — the surrounding context h stores for anchoring. Hard-deleted afterward."""
     cfg = Config.load()
@@ -167,7 +166,7 @@ def seeded_with_prose_context() -> Any:
 def test_from_pg_row_surfaces_prose_context(seeded_with_prose_context: Any) -> None:
     cfg, tag = seeded_with_prose_context
     [row] = _run_rows(cfg, tag)
-    assert row.quote == EXACT_1
+    assert [row.quote] == _normalized_quotes(cfg, tag)
     # prefix/suffix are the prose anchors h stores around the selection, surfaced for the CLI.
     assert row.quote_prefix == "For classifiers "
     assert row.quote_suffix == " is the pullback"
@@ -186,7 +185,8 @@ def test_from_pg_row_maps_page_index_from_a_real_pdf_row() -> None:
     ann = Annotation.from_pg_row(json.loads(PDF_ROW_FIXTURE.read_text()))
     assert ann.page_index == 1  # PageSelector.index
     assert ann.uri == "https://arxiv.org/pdf/2312.03638"
-    assert ann.quote.startswith("Theorem 1.1.")
+    assert ann.quote == ""
+    assert "no normalized quote" in (ann.normalization_error or "")
     assert ann.quote_prefix == ". ZACK GARZA, AND LUCA SCHAFFLER "
     assert ann.quote_suffix == "In Sections 6, 7 we describe all"
     assert ann.text == "Looks good."

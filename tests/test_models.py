@@ -11,7 +11,7 @@ own serialization contract.
 from annotate.models import LedgerEntry
 
 
-def test_ledger_entry_json_round_trip():
+def test_ledger_entry_json_round_trip() -> None:
     entry = LedgerEntry(
         id="2362ce89-82a6-11f1-9030-6f51a56e1c15",
         created="2026-07-18T10:00:00",

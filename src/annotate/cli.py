@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import pathlib
 import re
-import signal
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -29,15 +27,22 @@ from annotate.api import HClient
 from annotate.config import Config
 from annotate.ledger import (
     DEFAULT_LEDGER,
+)
+from annotate.ledger import (
     append as ledger_append,
+)
+from annotate.ledger import (
     repo_root as ledger_repo_root,
+)
+from annotate.ledger import (
     resolve as ledger_resolve,
+)
+from annotate.ledger import (
     track as ledger_track,
 )
-from annotate.mathquote import clean_quote, has_math
 from annotate.models import Annotation, LedgerEntry
-from annotate.pdfmath import clean_pdf_quote, pdf_has_math
 from annotate.session import ACTED, OPEN, SEND, batch_since
+from annotate.session_server import wait_for_close
 from annotate.source import AnnotationSource, PostgresSource
 
 #: Where a session's open timestamp is parked, inside the repo's untracked ``.git`` dir so it
@@ -52,7 +57,7 @@ class App:
     source: AnnotationSource
     client: HClient
     group_id: str
-    cfg: Config = dataclasses.field(default_factory=Config)
+    cfg: Config | None = None
 
 
 def _open_time_path(root: pathlib.Path) -> pathlib.Path:
@@ -75,19 +80,11 @@ def _read_open_time(root: pathlib.Path) -> datetime | None:
 
 
 def _park(timeout: int) -> bool:
-    """Block until the harness wakes us with ``SIGUSR1``, or ``timeout`` seconds elapse.
-
-    Returns ``True`` when woken (deliver the batch) and ``False`` on timeout. SIGUSR1 is
-    blocked first so the wake is caught by ``sigtimedwait`` rather than running its default
-    action (terminate). Module-level so tests can monkeypatch it instead of racing a real signal.
-    """
-    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
-    return signal.sigtimedwait({signal.SIGUSR1}, timeout) is not None
+    """Block on the extension-facing loopback close endpoint, or time out."""
+    return wait_for_close(timeout)
 
 
-def _current_batch(
-    source: AnnotationSource, group_id: str, root: pathlib.Path
-) -> list[Annotation]:
+def _current_batch(source: AnnotationSource, group_id: str, root: pathlib.Path) -> list[Annotation]:
     """The real annotations created since this repo's open session started, or ``[]`` when no
     session is open."""
     since = _read_open_time(root)
@@ -106,8 +103,7 @@ def _ledger_path_option(f: Callable[..., Any]) -> Callable[..., Any]:
         "--path",
         "rel_path",
         default=None,
-        help="Ledger file, relative to the repo root. Defaults to feedback/ledger.jsonl; "
-        "name it per workflow (e.g. research-intake.jsonl). Created and tracked if absent.",
+        help="Ledger file, relative to the repo root. Defaults to feedback/ledger.jsonl; name it per workflow (e.g. research-intake.jsonl). Created and tracked if absent.",
     )(f)
 
 
@@ -143,45 +139,13 @@ def _record(anns: list[Annotation], rel_path: str | None) -> list[LedgerEntry]:
     return new
 
 
-def _clean_quote(ann: Annotation) -> Annotation:
-    """One annotation's quote rewritten to clean LaTeX when it spans math. A PDF annotation
-    (it carries a page index) goes through region OCR; an HTML one through the embedded
-    x-tex layer. Any boundary miss — no math, unreachable source, missing OCR key — keeps
-    the raw quote, which is honest, so normalization never blocks delivery."""
-    q = ann.quote
-    if not q:
-        return ann
-    try:
-        if ann.page_index is not None:  # PDF annotation
-            fetchable = ann.uri.startswith(("http://", "https://"))
-            if fetchable and pdf_has_math(q):
-                if not os.environ.get("MATHPIX_API_KEY"):
-                    click.echo(
-                        f"[annotate] MATHPIX_API_KEY not set; leaving PDF math raw for {ann.uri}",
-                        err=True,
-                    )
-                    return ann
-                clean = clean_pdf_quote(ann.uri, ann.page_index, ann.quote_prefix, ann.quote_suffix, q)
-                return dataclasses.replace(ann, quote=clean)
-            return ann
-        if has_math(q):  # HTML annotation
-            return dataclasses.replace(ann, quote=clean_quote(ann.uri, q))
-    except (httpx.HTTPError, OSError) as exc:
-        click.echo(f"[annotate] math normalize failed for {ann.uri}: {exc}", err=True)
-    return ann
-
-
-def _normalize_math(anns: list[Annotation]) -> list[Annotation]:
-    """Rewrite math-bearing quotes to clean ``$…$`` LaTeX — PDF via region OCR, HTML via the
-    embedded x-tex layer. Best effort: a source that can't be reached leaves the raw quote
-    and logs why, so a network blip or missing OCR key never breaks delivery."""
-    return [_clean_quote(ann) for ann in anns]
-
-
 def _deliver(anns: list[Annotation], rel_path: str | None) -> None:
     """Record the delivered annotations, then print the batch to stdout. Recording runs
     first, so feedback can never reach the agent unrecorded."""
-    anns = _normalize_math(anns)
+    missing = [ann for ann in anns if ann.normalization_error is not None]
+    if missing:
+        details = "; ".join(f"{ann.id}: {ann.normalization_error}" for ann in missing)
+        raise click.ClickException(f"cannot deliver unnormalized annotation(s): {details}")
     _record(anns, rel_path)
     click.echo(_anns_json(anns))
 
@@ -192,7 +156,7 @@ def main(ctx: click.Context) -> None:
     """Git-anchored review loop over self-hosted Hypothesis annotations.
 
     Workflow: `wait` opens a review session (records the open timestamp locally) and blocks
-    until the harness wakes it; it then records the batch of annotations created during the
+    until the browser closes it; it then records the batch of annotations created during the
     window to a git-tracked ledger and prints it. You act on the feedback, then `resolve`
     tags it done. `slice` browses annotations made outside a session and `record` preserves
     the ones worth keeping.
@@ -226,20 +190,20 @@ def pull(app: App, rel_path: str | None) -> None:
     "--timeout",
     default=300,
     show_default=True,
-    help="Max seconds to wait for the harness wake (SIGUSR1) before giving up.",
+    help="Max seconds to wait for the browser's session-close request before giving up.",
 )
 @_ledger_path_option
 @click.pass_obj
 def wait(app: App, timeout: int, rel_path: str | None) -> None:
-    """Open a session, block until the harness wakes us, then record and print the batch JSON.
+    """Open a session, block until the browser closes it, then record and print the batch JSON.
 
-    Records the open timestamp locally (no h write), parks until ``SIGUSR1`` arrives, then
-    delivers the real annotations created during the window.
+    Records the open timestamp locally (no h write), serves a loopback close endpoint, then
+    delivers the real annotations created during the window when the extension calls it.
     """
     root = _require_repo()  # bounce before opening a session whose batch we could not record
     _write_open_time(root, datetime.now())
     if not _park(timeout):
-        raise click.ClickException(f"timed out after {timeout}s waiting for the harness wake")
+        raise click.ClickException(f"timed out after {timeout}s waiting for the browser session-close request")
     _deliver(_current_batch(app.source, app.group_id, root), rel_path)
 
 
@@ -256,9 +220,7 @@ def _parse_last(last: str) -> timedelta:
     """Parse a ``\\d+[smhd]`` relative window (e.g. ``2h``) into a timedelta."""
     m = _DURATION.match(last)
     if m is None:
-        raise click.BadParameter(
-            f"expected <int>[smhd], got {last!r}", param_hint="--last"
-        )
+        raise click.BadParameter(f"expected <int>[smhd], got {last!r}", param_hint="--last")
     return timedelta(**{_UNIT[m.group(2)]: int(m.group(1))})
 
 
@@ -304,8 +266,7 @@ def slice_(
     click.echo(_anns_json(anns))
     if anns:
         click.echo(
-            f"[annotate] {len(anns)} shown, not recorded. Preserve the relevant ones with:\n"
-            f"    annotate record {' '.join(a.id for a in anns)}",
+            f"[annotate] {len(anns)} shown, not recorded. Preserve the relevant ones with:\n    annotate record {' '.join(a.id for a in anns)}",
             err=True,
         )
 
@@ -324,7 +285,12 @@ def record(app: App, rel_path: str | None, annotation_ids: tuple[str, ...]) -> N
     missing = [i for i in annotation_ids if i not in by_id]
     if missing:
         raise click.ClickException(f"annotation id(s) not in the group: {', '.join(missing)}")
-    new = _record(_normalize_math([by_id[i] for i in annotation_ids]), rel_path)
+    selected = [by_id[i] for i in annotation_ids]
+    missing_normalization = [ann for ann in selected if ann.normalization_error is not None]
+    if missing_normalization:
+        details = "; ".join(f"{ann.id}: {ann.normalization_error}" for ann in missing_normalization)
+        raise click.ClickException(f"cannot record unnormalized annotation(s): {details}")
+    new = _record(selected, rel_path)
     click.echo(json.dumps([dataclasses.asdict(e) for e in new], default=str))
 
 
@@ -346,11 +312,7 @@ def _exact_quotes(target: Any) -> list[str]:
         if not isinstance(t, dict):
             continue
         for sel in t.get("selector") or []:
-            if (
-                isinstance(sel, dict)
-                and sel.get("type") == "TextQuoteSelector"
-                and sel.get("exact")
-            ):
+            if isinstance(sel, dict) and sel.get("type") == "TextQuoteSelector" and sel.get("exact"):
                 quotes.append(sel["exact"])
     return quotes
 
@@ -422,23 +384,16 @@ def doctor(app: App) -> None:
 
     root = ledger_repo_root(pathlib.Path.cwd())
     if root is None:
-        rows.append(
-            (False, "git repo", "not inside one -- no feedback can be recorded; cd into the "
-             "repo you are reviewing, or run `git init`")
-        )
+        rows.append((False, "git repo", "not inside one -- no feedback can be recorded; cd into the repo you are reviewing, or run `git init`"))
     else:
         rows.append((True, "git repo", f"{root} (feedback -> {ledger_resolve(DEFAULT_LEDGER, root)})"))
 
-    missing = [n for n in ("group_id", "token") if not getattr(cfg, n)]
-    if missing:
-        rows.append(
-            (False, "config", f"missing {', '.join(missing)} in ~/.config/annotate/config.toml")
-        )
+    if cfg is None:
+        rows.append((False, "config", "configuration was not loaded"))
     else:
         rows.append((True, "config", f"group {cfg.group_id}, api {cfg.api_url}"))
-
-    rows.append(_probe("h API", lambda: _h_reachable(cfg.api_url)))
-    rows.append(_probe("Postgres", lambda: _pg_reachable(cfg.pg_dsn)))
+        rows.append(_probe("h API", lambda: _h_reachable(cfg.api_url)))
+        rows.append(_probe("Postgres", lambda: _pg_reachable(cfg.pg_dsn)))
 
     for ok, label, detail in rows:
         click.echo(f"[{'OK' if ok else 'FAIL'}] {label}: {detail}")

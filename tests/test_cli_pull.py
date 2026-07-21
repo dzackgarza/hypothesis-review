@@ -10,9 +10,10 @@ monkeypatch ``_park`` rather than racing a real signal. Source and client are st
 
 import json
 from datetime import datetime
+from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
-
 from conftest import committed_at_head
 
 from annotate.api import HClient
@@ -71,12 +72,12 @@ def _app(anns: list[Annotation], client: HClient | None = None) -> App:
     return App(source=_StubSource(anns), client=client or _StubClient(), group_id="grp")
 
 
-def _ledger_ids(repo) -> list[str]:
+def _ledger_ids(repo: Path) -> list[str]:
     p = repo / "feedback" / "ledger.jsonl"
     return [json.loads(line)["id"] for line in p.read_text().splitlines()] if p.exists() else []
 
 
-def test_pull_records_and_prints_batch(git_repo):
+def test_pull_records_and_prints_batch(git_repo: Path) -> None:
     _write_open_time(git_repo, OPEN_TIME)
     result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
     assert result.exit_code == 0, result.output
@@ -87,14 +88,35 @@ def test_pull_records_and_prints_batch(git_repo):
     assert "default ledger" in result.stderr
 
 
-def test_pull_bounces_when_not_in_a_git_repo(tmp_path, monkeypatch):
+def test_pull_rejects_a_highlight_without_backend_normalization(git_repo: Path) -> None:
+    _write_open_time(git_repo, OPEN_TIME)
+    missing = Annotation(
+        id="missing",
+        created=datetime(2026, 7, 20, 12, 0, 1),
+        userid="acct:me@localhost",
+        group="grp",
+        uri="http://localhost/missing",
+        text="note",
+        target=[{"selector": [{"type": "TextQuoteSelector", "exact": "flattened math"}]}],
+        normalization_error="h has no normalized quote; diagnostic abc-123",
+    )
+
+    result = CliRunner().invoke(main, ["pull"], obj=_app([missing]))
+
+    assert result.exit_code != 0
+    assert "cannot deliver unnormalized annotation" in result.stderr
+    assert "diagnostic abc-123" in result.stderr
+    assert _ledger_ids(git_repo) == []
+
+
+def test_pull_bounces_when_not_in_a_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)  # a bare dir, not a git repo
     result = CliRunner().invoke(main, ["pull"], obj=_app([A, B]))
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr
 
 
-def test_pull_dedups_on_a_second_call(git_repo):
+def test_pull_dedups_on_a_second_call(git_repo: Path) -> None:
     _write_open_time(git_repo, OPEN_TIME)
     runner = CliRunner()
     runner.invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
@@ -107,25 +129,23 @@ def test_pull_dedups_on_a_second_call(git_repo):
     assert committed_at_head(git_repo) == head_after_first  # no second commit
 
 
-def test_pull_records_to_named_path(git_repo):
+def test_pull_records_to_named_path(git_repo: Path) -> None:
     _write_open_time(git_repo, OPEN_TIME)
-    result = CliRunner().invoke(
-        main, ["pull", "--path", "research-intake.jsonl"], obj=_app([A, B])
-    )
+    result = CliRunner().invoke(main, ["pull", "--path", "research-intake.jsonl"], obj=_app([A, B]))
     assert result.exit_code == 0, result.output
     assert (git_repo / "research-intake.jsonl").exists()
     assert "research-intake.jsonl" in committed_at_head(git_repo)
     assert "default ledger" not in result.stderr  # a name was supplied
 
 
-def test_pull_empty_when_no_session_is_open(git_repo):
+def test_pull_empty_when_no_session_is_open(git_repo: Path) -> None:
     result = CliRunner().invoke(main, ["pull"], obj=_app([A, B]))  # no open_time parked
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
     assert _ledger_ids(git_repo) == []  # nothing to record
 
 
-def test_wait_parks_open_time_then_records_and_prints_batch(git_repo, monkeypatch):
+def test_wait_parks_open_time_then_records_and_prints_batch(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("annotate.cli._park", lambda timeout: True)  # harness woke us
     client = _StubClient()
     result = CliRunner().invoke(main, ["wait"], obj=_app([PAST, FUTURE_A, FUTURE_B], client=client))
@@ -136,7 +156,7 @@ def test_wait_parks_open_time_then_records_and_prints_batch(git_repo, monkeypatc
     assert _ledger_ids(git_repo) == ["a", "b"]  # batch recorded
 
 
-def test_wait_times_out_without_a_wake(git_repo, monkeypatch):
+def test_wait_times_out_without_a_wake(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("annotate.cli._park", lambda timeout: False)  # nobody woke us
     result = CliRunner().invoke(main, ["wait", "--timeout", "1"], obj=_app([FUTURE_A, FUTURE_B]))
     assert result.exit_code != 0
@@ -144,10 +164,15 @@ def test_wait_times_out_without_a_wake(git_repo, monkeypatch):
     assert _ledger_ids(git_repo) == []  # nothing delivered on timeout
 
 
-def test_wait_bounces_before_parking_outside_a_repo(tmp_path, monkeypatch):
+def test_wait_bounces_before_parking_outside_a_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    parked = []
-    monkeypatch.setattr("annotate.cli._park", lambda timeout: parked.append(True) or True)
+    parked: list[bool] = []
+
+    def mark_parked(timeout: int) -> bool:
+        parked.append(True)
+        return True
+
+    monkeypatch.setattr("annotate.cli._park", mark_parked)
     result = CliRunner().invoke(main, ["wait"], obj=_app([FUTURE_A, FUTURE_B]))
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr

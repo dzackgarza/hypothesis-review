@@ -64,6 +64,7 @@ class Annotation:
     quote_prefix: str = ""
     quote_suffix: str = ""
     page_index: int | None = None
+    normalization_error: str | None = None
 
     def is_marker(self, kind: str) -> bool:
         return kind in self.tags
@@ -79,6 +80,11 @@ class Annotation:
         API and is JSON-serializable (the ledger dumps without a ``uuid`` encoder).
         """
         tq = _text_quote(row["target_selectors"])
+        raw_quote = tq["exact"] if "exact" in tq else ""
+        normalized_quote = row.get("normalized_quote")
+        normalization_error = None
+        if raw_quote and normalized_quote is None:
+            normalization_error = "h has no normalized quote for this highlighted annotation; run `h normalize-annotations` and inspect the reported diagnostic"
         return cls(
             id=_public_id(row["id"]),
             created=row["created"],
@@ -88,10 +94,11 @@ class Annotation:
             text=row["text"],
             tags=list(row["tags"] or []),
             target=[{"source": row["target_uri"], "selector": row["target_selectors"]}],
-            quote=tq.get("exact", ""),
-            quote_prefix=tq.get("prefix", ""),
-            quote_suffix=tq.get("suffix", ""),
+            quote=normalized_quote or "",
+            quote_prefix=tq["prefix"] if "prefix" in tq else "",
+            quote_suffix=tq["suffix"] if "suffix" in tq else "",
             page_index=_page_index_of(row["target_selectors"]),
+            normalization_error=normalization_error,
         )
 
 

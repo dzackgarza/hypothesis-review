@@ -6,9 +6,11 @@ throwaway ``git_repo`` fixture. Stubs supply annotation data via ``ctx.obj``.
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
 
+import pytest
 from click.testing import CliRunner
-
 from conftest import committed_at_head
 
 from annotate.api import HClient
@@ -17,7 +19,7 @@ from annotate.config import Config
 from annotate.models import Annotation
 
 
-def _ann(id, created, tags=None):
+def _ann(id: str, created: Any, tags: list[str] | None = None) -> Annotation:
     return Annotation(
         id=id,
         created=created,
@@ -33,10 +35,15 @@ def _ann(id, created, tags=None):
 class _StubSource:
     """In-memory AnnotationSource honoring the since/until window contract."""
 
-    def __init__(self, anns):
+    def __init__(self, anns: list[Annotation]) -> None:
         self._anns = anns
 
-    def list(self, group_id, since=None, until=None):
+    def list(
+        self,
+        group_id: str,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[Annotation]:
         rows = [a for a in self._anns if a.group == group_id]
         if since is not None:
             rows = [a for a in rows if a.created > since]
@@ -48,14 +55,14 @@ class _StubSource:
 class _StubClient(HClient):
     """Records ``acted`` tag writes without opening an httpx client."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.tagged: list[tuple[str, list[str]]] = []
 
     def tag(self, annotation_id: str, add: list[str]) -> None:
         self.tagged.append((annotation_id, list(add)))
 
 
-def _app(anns, client=None):
+def _app(anns: list[Annotation], client: HClient | None = None) -> App:
     return App(source=_StubSource(anns), client=client or _StubClient(), group_id="grp")
 
 
@@ -66,7 +73,7 @@ B = _ann("b", 3)
 SEND_M = _ann("send", 4, ["review:send"])
 
 
-def test_slice_last_returns_only_in_window_non_markers():
+def test_slice_last_returns_only_in_window_non_markers() -> None:
     now = datetime.now()
     recent = _ann("recent", now - timedelta(minutes=30))
     old = _ann("old", now - timedelta(hours=2))
@@ -76,7 +83,7 @@ def test_slice_last_returns_only_in_window_non_markers():
     assert [a["id"] for a in json.loads(result.stdout)] == ["recent"]
 
 
-def test_slice_points_at_record_for_preservation():
+def test_slice_points_at_record_for_preservation() -> None:
     now = datetime.now()
     recent = _ann("recent", now - timedelta(minutes=30))
     result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([recent]))
@@ -84,14 +91,14 @@ def test_slice_points_at_record_for_preservation():
     assert "annotate record recent" in result.stderr  # guidance names the command + id
 
 
-def test_slice_with_no_hits_gives_no_record_guidance():
+def test_slice_with_no_hits_gives_no_record_guidance() -> None:
     result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([]))
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
     assert "annotate record" not in result.stderr
 
 
-def test_record_appends_named_annotations_and_commits(git_repo):
+def test_record_appends_named_annotations_and_commits(git_repo: Path) -> None:
     result = CliRunner().invoke(main, ["record", "a", "b"], obj=_app([OPEN_M, A, B, SEND_M]))
     assert result.exit_code == 0, result.output
     assert [e["id"] for e in json.loads(result.stdout)] == ["a", "b"]  # recorded entries
@@ -100,20 +107,20 @@ def test_record_appends_named_annotations_and_commits(git_repo):
     assert "feedback/ledger.jsonl" in committed_at_head(git_repo)
 
 
-def test_record_rejects_an_unknown_id(git_repo):
+def test_record_rejects_an_unknown_id(git_repo: Path) -> None:
     result = CliRunner().invoke(main, ["record", "nope"], obj=_app([OPEN_M, A, B, SEND_M]))
     assert result.exit_code != 0
     assert "not in the group" in result.stderr
 
 
-def test_record_bounces_outside_a_git_repo(tmp_path, monkeypatch):
+def test_record_bounces_outside_a_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(main, ["record", "a"], obj=_app([A]))
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr
 
 
-def test_resolve_tags_each_batch_member_acted(git_repo):
+def test_resolve_tags_each_batch_member_acted(git_repo: Path) -> None:
     from annotate.cli import _write_open_time
 
     _write_open_time(git_repo, datetime(2026, 7, 20, 12, 0, 0))
@@ -125,7 +132,7 @@ def test_resolve_tags_each_batch_member_acted(git_repo):
     assert client.tagged == [("a", ["acted"]), ("b", ["acted"])]
 
 
-def test_status_counts_open_annotations():
+def test_status_counts_open_annotations() -> None:
     acted = _ann("c", 5, ["acted"])
     result = CliRunner().invoke(main, ["status"], obj=_app([OPEN_M, A, B, SEND_M, acted]))
     assert result.exit_code == 0, result.output
@@ -133,7 +140,7 @@ def test_status_counts_open_annotations():
     assert "acted=1" in result.stdout
 
 
-def test_status_root_flags_drifted_quote(tmp_path):
+def test_status_root_flags_drifted_quote(tmp_path: Path) -> None:
     build = tmp_path / "site"
     build.mkdir()
     (build / "a.html").write_text("... the exact quote a is still here ...")
@@ -154,7 +161,7 @@ def test_status_root_flags_drifted_quote(tmp_path):
     assert "drift\tgone" in result.stdout
 
 
-def test_doctor_fails_and_explains_outside_a_git_repo(tmp_path, monkeypatch):
+def test_doctor_fails_and_explains_outside_a_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(main, ["doctor"], obj=_app([]))
     assert result.exit_code != 0  # a failing check exits non-zero so agents can gate on it
@@ -162,12 +169,17 @@ def test_doctor_fails_and_explains_outside_a_git_repo(tmp_path, monkeypatch):
     assert "no feedback can be recorded" in result.stdout
 
 
-def test_doctor_reports_git_repo_and_where_feedback_lands(git_repo):
+def test_doctor_reports_git_repo_and_where_feedback_lands(git_repo: Path) -> None:
     app = App(
         source=_StubSource([]),
         client=_StubClient(),
         group_id="g",
-        cfg=Config(group_id="g", token="6879-x"),
+        cfg=Config(
+            api_url="http://localhost:5000",
+            pg_dsn="postgresql://localhost/h",
+            group_id="g",
+            token="6879-x",
+        ),
     )
     result = CliRunner().invoke(main, ["doctor"], obj=app)
     assert "[OK] git repo" in result.stdout

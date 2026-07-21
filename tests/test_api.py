@@ -16,6 +16,7 @@ render-test page: h recovers its LaTeX from the page source (no Mathpix) and ret
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -52,21 +53,22 @@ def _seed(cfg: Config, tags: list[str]) -> str:
         },
     )
     resp.raise_for_status()
-    return resp.json()["id"]
+    annotation_id = resp.json()["id"]
+    assert isinstance(annotation_id, str)
+    return annotation_id
 
 
 def _rows_for_tag(dsn: str, tag: str) -> list[dict[str, Any]]:
     with psycopg.connect(dsn) as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT target_uri, tags, groupid FROM annotation "
-            "WHERE tags @> ARRAY[%s]::text[] AND deleted = false",
+            "SELECT target_uri, tags, groupid FROM annotation WHERE tags @> ARRAY[%s]::text[] AND deleted = false",
             (tag,),
         )
         return cur.fetchall()
 
 
 @pytest.fixture
-def run() -> Any:
+def run() -> Iterator[tuple[Config, str]]:
     """A per-run unique tag every created annotation carries, hard-deleted after."""
     cfg = Config.load()
     tag = f"__it_{uuid.uuid4().hex}"

@@ -6,20 +6,24 @@ commands resolve the repo from the current working directory.
 """
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
 
-def _git(repo, *args):
+def _git(repo: Path, *args: str) -> None:
     # core.hooksPath=/dev/null keeps this throwaway repo off the machine-wide commit gate.
     subprocess.run(
         ["git", "-c", "core.hooksPath=/dev/null", *args],
-        cwd=repo, check=True, capture_output=True, text=True,
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
 @pytest.fixture
-def git_repo(tmp_path, monkeypatch):
+def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A throwaway git repo with the working directory inside it."""
     repo = tmp_path / "proj"
     repo.mkdir()
@@ -33,9 +37,11 @@ def git_repo(tmp_path, monkeypatch):
     return repo
 
 
-def committed_at_head(repo):
+def committed_at_head(repo: Path) -> str:
     """The file paths in the repo's most recent commit."""
     return subprocess.run(
         ["git", "-C", str(repo), "show", "--name-only", "--format=", "HEAD"],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout

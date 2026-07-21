@@ -32,22 +32,25 @@ class AnnotationSource(Protocol):
         ...
 
 
-def _build_query(
-    group_id: str, since: datetime | None, until: datetime | None
-) -> tuple[sql.Composed, list[Any]]:
+def _build_query(group_id: str, since: datetime | None, until: datetime | None) -> tuple[sql.Composed, list[Any]]:
     """Assemble the parameterized SELECT. All user data flows through ``params``;
     the SQL is composed only from constant fragments (psycopg ``sql.SQL``)."""
-    clauses = [sql.SQL("groupid = %s"), sql.SQL("deleted = false")]
+    clauses = [sql.SQL("annotation.groupid = %s"), sql.SQL("annotation.deleted = false")]
     params: list[Any] = [group_id]
     if since is not None:
-        clauses.append(sql.SQL("created > %s"))
+        clauses.append(sql.SQL("annotation.created > %s"))
         params.append(since)
     if until is not None:
-        clauses.append(sql.SQL("created <= %s"))
+        clauses.append(sql.SQL("annotation.created <= %s"))
         params.append(until)
     query = sql.SQL(
-        "SELECT id, created, userid, groupid, target_uri, target_selectors, text, tags "
-        "FROM annotation WHERE {where} ORDER BY created"
+        "SELECT annotation.id, annotation.created, annotation.userid, annotation.groupid, "
+        "annotation.target_uri, annotation.target_selectors, annotation.text, annotation.tags, "
+        "normalized.normalized_quote "
+        "FROM annotation "
+        "LEFT JOIN annotation_normalized AS normalized "
+        "ON normalized.annotation_id = annotation.id "
+        "WHERE {where} ORDER BY annotation.created"
     ).format(where=sql.SQL(" AND ").join(clauses))
     return query, params
 
