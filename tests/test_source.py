@@ -142,6 +142,29 @@ def test_list_since_is_exclusive_and_until_is_inclusive(seeded: Any) -> None:
     assert second.created > first.created  # sanity: distinct, ordered timestamps
 
 
+@pytest.mark.pg
+def test_an_empty_value_in_the_real_normalized_column_is_refused_like_a_missing_row(seeded: Any) -> None:
+    """h's ``annotation_normalized.normalized_quote`` is ``text NOT NULL`` with no constraint
+    requiring it to be non-empty, so an empty normalization is a state the real schema can
+    hold and the read path can encounter. It carries no more quotable text than a missing
+    row, so it has to reach the CLI as the same refusal -- otherwise it is delivered as a
+    successful annotation with nothing to quote and no error. Proved by writing the empty
+    value into the real column and reading it back through the real query."""
+    cfg, tag, _page, _ids = seeded
+    with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE annotation_normalized SET normalized_quote = '' WHERE annotation_id IN (SELECT id FROM annotation WHERE tags @> ARRAY[%s]::text[])",
+            (tag,),
+        )
+        conn.commit()
+
+    rows = _run_rows(cfg, tag)
+
+    assert _normalized_quotes(cfg, tag) == ["", ""]  # the column really holds the empty value
+    assert [row.quote for row in rows] == ["", ""]
+    assert [row.normalization_error is None for row in rows] == [False, False]
+
+
 @pytest.fixture
 def seeded_with_prose_context() -> Iterator[tuple[Config, str]]:
     """One annotation whose TextQuoteSelector carries prefix/suffix prose anchors alongside the
@@ -186,7 +209,9 @@ def test_from_pg_row_maps_page_index_from_a_real_pdf_row() -> None:
     assert ann.page_index == 1  # PageSelector.index
     assert ann.uri == "https://arxiv.org/pdf/2312.03638"
     assert ann.quote == ""
-    assert "no normalized quote" in (ann.normalization_error or "")
+    # h never normalized this highlight, so the row must carry the refusal that keeps every
+    # delivering command from handing it on (proved per command in test_cli_normalization_gate).
+    assert ann.normalization_error is not None
     assert ann.quote_prefix == ". ZACK GARZA, AND LUCA SCHAFFLER "
     assert ann.quote_suffix == "In Sections 6, 7 we describe all"
     assert ann.text == "Looks good."
