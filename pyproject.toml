@@ -3,7 +3,7 @@ name = "annotate"
 version = "0.1.0"
 description = "Git-anchored, agent-driven review loop over self-hosted Hypothesis annotations."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "click",
     "psycopg[binary]",

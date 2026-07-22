@@ -1,24 +1,27 @@
-"""CLI tests for the batch/ledger/anchor commands (Task 8).
+"""CLI tests for slice (read-only view + guidance), record (append by id), resolve, status.
 
-Stubs stand in for the Postgres source and h API client, injected via
-``ctx.obj`` exactly as ``test_cli_pull.py`` does. ``rewind``/``delta`` run
-against a throwaway git repo (``core.hooksPath=/dev/null`` isolates it from the
-machine-wide commit gate, mirroring ``test_anchor.py``).
+slice/resolve/status touch no ledger, so they need no repo; record commits into the
+throwaway ``git_repo`` fixture. Stubs supply annotation data via ``ctx.obj``.
 """
 
 import json
-import subprocess
+import re
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
 
+import pytest
 from click.testing import CliRunner
+from conftest import committed_at_head, free_port, http_service
 
 from annotate.api import HClient
-from annotate.cli import App, main
+from annotate.cli import _BUILD_TEXT_MAX_BYTES, App, main
 from annotate.config import Config
-from annotate.models import Annotation, LedgerEntry
+from annotate.models import Annotation
+from annotate.session import write_open_time
 
 
-def _ann(id, created, tags=None):
+def _ann(id: str, created: Any, tags: list[str] | None = None) -> Annotation:
     return Annotation(
         id=id,
         created=created,
@@ -34,10 +37,15 @@ def _ann(id, created, tags=None):
 class _StubSource:
     """In-memory AnnotationSource honoring the since/until window contract."""
 
-    def __init__(self, anns):
+    def __init__(self, anns: list[Annotation]) -> None:
         self._anns = anns
 
-    def list(self, group_id, since=None, until=None):
+    def list(
+        self,
+        group_id: str,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[Annotation]:
         rows = [a for a in self._anns if a.group == group_id]
         if since is not None:
             rows = [a for a in rows if a.created > since]
@@ -47,81 +55,102 @@ class _StubSource:
 
 
 class _StubClient(HClient):
-    """Records marker/tag writes without opening an httpx client."""
+    """Records ``acted`` tag writes without opening an httpx client."""
 
-    def __init__(self):
-        self.markers: list[tuple[str, str]] = []
+    def __init__(self) -> None:
         self.tagged: list[tuple[str, list[str]]] = []
-
-    def create_marker(self, group_id: str, kind: str) -> str:
-        self.markers.append((group_id, kind))
-        return "m1"
 
     def tag(self, annotation_id: str, add: list[str]) -> None:
         self.tagged.append((annotation_id, list(add)))
 
 
-def _app(anns, client=None, cfg=None):
-    return App(
-        source=_StubSource(anns),
-        client=client or _StubClient(),
-        group_id="grp",
-        cfg=cfg or Config(),
-    )
+def _app(anns: list[Annotation], client: HClient | None = None) -> App:
+    return App(source=_StubSource(anns), client=client or _StubClient(), group_id="grp")
 
 
-# Int-timestamped session used by resolve/status (int ordering == chronological).
+# Int-timestamped session (int order == chronological).
 OPEN_M = _ann("open", 1, ["review:open"])
 A = _ann("a", 2)
 B = _ann("b", 3)
 SEND_M = _ann("send", 4, ["review:send"])
 
 
-def test_slice_last_returns_only_in_window_non_markers():
+def test_slice_last_returns_only_in_window_non_markers() -> None:
     now = datetime.now()
     recent = _ann("recent", now - timedelta(minutes=30))
     old = _ann("old", now - timedelta(hours=2))
     marker = _ann("open", now - timedelta(minutes=20), ["review:open"])
     result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([recent, old, marker]))
     assert result.exit_code == 0, result.output
-    assert [a["id"] for a in json.loads(result.output)] == ["recent"]
+    assert [a["id"] for a in json.loads(result.stdout)] == ["recent"]
 
 
-def test_resolve_tags_each_batch_member_acted():
+def test_slice_points_at_record_for_preservation() -> None:
+    now = datetime.now()
+    recent = _ann("recent", now - timedelta(minutes=30))
+    result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([recent]))
+    assert result.exit_code == 0, result.output
+    assert "annotate record recent" in result.stderr  # guidance names the command + id
+
+
+def test_slice_with_no_hits_gives_no_record_guidance() -> None:
+    result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([]))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    assert "annotate record" not in result.stderr
+
+
+def test_record_appends_named_annotations_and_commits(git_repo: Path) -> None:
+    result = CliRunner().invoke(main, ["record", "a", "b"], obj=_app([OPEN_M, A, B, SEND_M]))
+    assert result.exit_code == 0, result.output
+    assert [e["id"] for e in json.loads(result.stdout)] == ["a", "b"]  # recorded entries
+    ledger = git_repo / "feedback" / "ledger.jsonl"
+    assert [json.loads(line)["id"] for line in ledger.read_text().splitlines()] == ["a", "b"]
+    assert "feedback/ledger.jsonl" in committed_at_head(git_repo)
+
+
+def test_record_rejects_an_unknown_id(git_repo: Path) -> None:
+    result = CliRunner().invoke(main, ["record", "nope"], obj=_app([OPEN_M, A, B, SEND_M]))
+    assert result.exit_code != 0
+    assert "not in the group" in result.stderr
+
+
+def test_record_bounces_outside_a_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["record", "a"], obj=_app([A]))
+    assert result.exit_code != 0
+    assert "not inside a git repository" in result.stderr
+
+
+def test_resolve_tags_each_batch_member_acted(git_repo: Path) -> None:
+    write_open_time(git_repo, datetime(2026, 7, 20, 12, 0, 0))
+    ra = _ann("a", datetime(2026, 7, 20, 12, 0, 1))
+    rb = _ann("b", datetime(2026, 7, 20, 12, 0, 2))
     client = _StubClient()
-    result = CliRunner().invoke(main, ["resolve"], obj=_app([OPEN_M, A, B, SEND_M], client=client))
+    result = CliRunner().invoke(main, ["resolve"], obj=_app([ra, rb], client=client))
     assert result.exit_code == 0, result.output
     assert client.tagged == [("a", ["acted"]), ("b", ["acted"])]
 
 
-def test_status_counts_open_annotations():
+def test_resolve_without_an_open_session_exits_nonzero(git_repo: Path) -> None:
+    # hypothesis-review#7: resolving with no session open must fail loudly, not tag an
+    # empty batch and report success.
+    client = _StubClient()
+    result = CliRunner().invoke(main, ["resolve"], obj=_app([A], client=client))
+    assert result.exit_code != 0
+    assert "no review session is open" in result.output
+    assert client.tagged == []
+
+
+def test_status_counts_open_annotations() -> None:
     acted = _ann("c", 5, ["acted"])
     result = CliRunner().invoke(main, ["status"], obj=_app([OPEN_M, A, B, SEND_M, acted]))
     assert result.exit_code == 0, result.output
-    assert "open=2" in result.output
-    assert "acted=1" in result.output
+    assert "open=2" in result.stdout
+    assert "acted=1" in result.stdout
 
 
-def test_ledger_appends_commit_stamped_entries(tmp_path):
-    deploy_log = tmp_path / "deploy-log.tsv"
-    deploy_log.write_text("2026-07-18T09:00:00\tsha_live\n")
-    ledger_path = tmp_path / "ledger.jsonl"
-    cfg = Config(ledger_path=ledger_path, deploy_log=deploy_log)
-    anns = [
-        _ann("open", "2026-07-18T09:30:00", ["review:open"]),
-        _ann("a", "2026-07-18T10:00:00"),
-        _ann("b", "2026-07-18T10:30:00"),
-        _ann("send", "2026-07-18T11:00:00", ["review:send"]),
-    ]
-    result = CliRunner().invoke(main, ["ledger"], obj=_app(anns, cfg=cfg))
-    assert result.exit_code == 0, result.output
-    printed = json.loads(result.output)
-    assert [e["id"] for e in printed] == ["a", "b"]
-    assert all(e["commit"] == "sha_live" and e["state"] == "open" for e in printed)
-    assert len(ledger_path.read_text().splitlines()) == 2
-
-
-def test_status_root_flags_drifted_quote(tmp_path):
+def test_status_root_flags_drifted_quote(tmp_path: Path) -> None:
     build = tmp_path / "site"
     build.mkdir()
     (build / "a.html").write_text("... the exact quote a is still here ...")
@@ -138,80 +167,172 @@ def test_status_root_flags_drifted_quote(tmp_path):
     )
     result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([A, drift]))
     assert result.exit_code == 0, result.output
-    assert "match\ta" in result.output
-    assert "drift\tgone" in result.output
+    assert "match\ta" in result.stdout
+    assert "drift\tgone" in result.stdout
 
 
-# --- rewind / delta against a real throwaway git repo ---
+def _drift_verdicts(stdout: str) -> dict[str, str]:
+    """The per-annotation verdicts ``status --root`` printed, keyed by annotation id."""
+    return {parts[1]: parts[0] for line in stdout.splitlines() if len(parts := line.split("\t")) == 3}
 
 
-def _git(cwd, *args):
-    subprocess.run(
-        ["git", "-c", "core.hooksPath=/dev/null", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _seed_repo(tmp_path):
-    repo = tmp_path / "reviewed"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "t@t")
-    _git(repo, "config", "user.name", "t")
-    (repo / "paper.html").write_text("v1\n")
-    _git(repo, "add", "paper.html")
-    _git(repo, "commit", "-q", "-m", "v1")
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    return repo, sha
-
-
-def _entry(id, commit, uri="paper.html"):
-    return LedgerEntry(
-        id=id,
-        created="2026-07-18T10:00:00",
-        uri=uri,
-        text="fix",
+def test_status_root_refuses_bytes_it_cannot_decode_rather_than_deriving_a_verdict_from_them(tmp_path: Path) -> None:
+    # 0xff is not valid UTF-8 in any position. A decoder told to drop what it cannot decode
+    # splices the bytes on either side of it into exactly the quoted text, so this tree gets
+    # reported as still containing a quote that it does not contain: drift called absent
+    # precisely where the command has the least information about the tree. Deriving no
+    # verdict at all is the only honest outcome, and the refusal has to name the file whose
+    # bytes stopped it or the operator cannot act on it.
+    build = tmp_path / "site"
+    build.mkdir()
+    (build / "asset.bin").write_bytes(b"vanished\xfftext")
+    spliced = Annotation(
+        id="spliced",
+        created=6,
+        userid="acct:me@localhost",
+        group="grp",
+        uri="http://localhost/spliced.html",
+        text="note spliced",
         tags=[],
-        target=None,
-        commit=commit,
-        state="open",
+        target=[{"selector": [{"type": "TextQuoteSelector", "exact": "vanishedtext"}]}],
     )
 
+    result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([spliced]))
 
-def _write_ledger(tmp_path, *entries):
-    p = tmp_path / "ledger.jsonl"
-    p.write_text("".join(e.to_json() + "\n" for e in entries))
-    return p
+    assert result.exit_code != 0
+    assert _drift_verdicts(result.stdout) == {}
+    assert "asset.bin" in result.output
 
 
-def test_rewind_looks_up_entry_and_prints_checkout_cmd(tmp_path, monkeypatch):
-    repo, sha = _seed_repo(tmp_path)
-    ledger_path = _write_ledger(
-        tmp_path,
-        _entry("other", "0" * 40),  # decoy with a bogus commit
-        _entry("a1", sha),
+def test_status_root_still_derives_verdicts_from_a_decodable_tree(tmp_path: Path) -> None:
+    # The counterpart to the refusal above: refusing undecodable bytes must not be bought by
+    # refusing text trees, so the same tree with the byte replaced still yields both verdicts.
+    build = tmp_path / "site"
+    build.mkdir()
+    (build / "asset.bin").write_bytes(b"vanished text")
+    (build / "a.html").write_text("... the exact quote a is still here ...")
+    spliced = Annotation(
+        id="spliced",
+        created=6,
+        userid="acct:me@localhost",
+        group="grp",
+        uri="http://localhost/spliced.html",
+        text="note spliced",
+        tags=[],
+        target=[{"selector": [{"type": "TextQuoteSelector", "exact": "vanishedtext"}]}],
     )
-    monkeypatch.chdir(repo)
-    result = CliRunner().invoke(
-        main, ["rewind", "a1"], obj=_app([], cfg=Config(ledger_path=ledger_path))
-    )
+
+    result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([A, spliced]))
+
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == f"git checkout {sha}"
+    assert _drift_verdicts(result.stdout) == {"a": "match", "spliced": "drift"}
 
 
-def test_delta_diffs_annotated_page_since_commit(tmp_path, monkeypatch):
-    repo, sha = _seed_repo(tmp_path)
-    (repo / "paper.html").write_text("v2 changed\n")
-    _git(repo, "commit", "-q", "-am", "v2")
-    ledger_path = _write_ledger(tmp_path, _entry("a1", sha))
-    monkeypatch.chdir(repo)
-    result = CliRunner().invoke(
-        main, ["delta", "a1"], obj=_app([], cfg=Config(ledger_path=ledger_path))
+def test_doctor_fails_and_explains_outside_a_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["doctor"], obj=_app([]))
+    assert result.exit_code != 0  # a failing check exits non-zero so agents can gate on it
+    assert "[FAIL] git repo" in result.stdout
+    assert "no feedback can be recorded" in result.stdout
+
+
+def test_doctor_reports_git_repo_and_where_feedback_lands(git_repo: Path) -> None:
+    app = App(
+        source=_StubSource([]),
+        client=_StubClient(),
+        group_id="g",
+        cfg=Config(
+            api_url="http://localhost:5000",
+            pg_dsn="postgresql://localhost/h",
+            group_id="g",
+            token="6879-x",
+        ),
     )
+    result = CliRunner().invoke(main, ["doctor"], obj=app)
+    assert "[OK] git repo" in result.stdout
+    assert "feedback/ledger.jsonl" in result.stdout  # tells the agent where feedback lands
+    assert "[OK] config" in result.stdout
+
+
+_DOCTOR_ROW = re.compile(r"^\[(OK|FAIL)] ([^:]+): (.*)$")
+
+
+def _doctor_rows(output: str) -> dict[str, tuple[bool, str]]:
+    """doctor's report parsed back into its per-check verdicts: label -> (ready, detail)."""
+    matched = (_DOCTOR_ROW.match(line) for line in output.splitlines())
+    return {m.group(2): (m.group(1) == "OK", m.group(3)) for m in matched if m is not None}
+
+
+def _doctor_app(api_url: str) -> App:
+    """An App whose h API points at ``api_url`` and whose Postgres points at a closed port,
+    so each doctor row's verdict is attributable to the dependency it names."""
+    return App(
+        source=_StubSource([]),
+        client=_StubClient(),
+        group_id="g",
+        cfg=Config(api_url=api_url, pg_dsn=f"postgresql://127.0.0.1:{free_port()}/none", group_id="g", token="6879-x"),
+    )
+
+
+def test_doctor_reports_an_h_that_answers_with_an_error_status_as_not_ready(git_repo: Path) -> None:
+    # A deployment that answers 503 is answering, and answering is not serving. Reporting it
+    # ready passes the gate and hands the operator a session that cannot work, so the very
+    # thing whose job is to tell them the truth up front has misled them.
+    with http_service(503) as api_url:
+        result = CliRunner().invoke(main, ["doctor"], obj=_doctor_app(api_url))
+
+    ready, detail = _doctor_rows(result.stdout)["h API"]
+    assert ready is False
+    assert "503" in detail  # the answer it actually got, not a verdict that discards it
+
+
+def test_doctor_separates_an_error_response_from_no_response_at_all(git_repo: Path) -> None:
+    # Different operator problems: one deployment is up and broken, the other is not there.
+    # Collapsing them costs the operator the first move in diagnosing either.
+    with http_service(503) as api_url:
+        answered = CliRunner().invoke(main, ["doctor"], obj=_doctor_app(api_url)).stdout
+    silent = CliRunner().invoke(main, ["doctor"], obj=_doctor_app(f"http://127.0.0.1:{free_port()}")).stdout
+
+    answered_ready, answered_detail = _doctor_rows(answered)["h API"]
+    silent_ready, silent_detail = _doctor_rows(silent)["h API"]
+    assert (answered_ready, silent_ready) == (False, False)
+    assert "503" in answered_detail
+    assert "503" not in silent_detail
+
+
+@pytest.mark.e2e
+def test_doctor_reports_the_live_serving_deployment_ready(git_repo: Path) -> None:
+    # The positive half of the same judgement, against the real configured stack: readiness
+    # is stated positively, so a serving h and a serving Postgres must both come back ready
+    # and the gate must let the session proceed.
+    cfg = Config.load()
+    app = App(source=_StubSource([]), client=_StubClient(), group_id=cfg.group_id, cfg=cfg)
+
+    result = CliRunner().invoke(main, ["doctor"], obj=app)
+
+    assert {label: ready for label, (ready, _) in _doctor_rows(result.stdout).items()} == {
+        "git repo": True,
+        "config": True,
+        "h API": True,
+        "Postgres": True,
+    }
     assert result.exit_code == 0, result.output
-    assert "v1" in result.output and "v2 changed" in result.output
+
+
+def test_status_root_larger_than_the_read_bound_exits_nonzero(tmp_path: Path) -> None:
+    # Drift detection reads the whole tree into memory; past the declared bound that
+    # must be a loud error, not an unbounded memory balloon. Proven against the real
+    # production bound and a genuinely oversized tree: the bound is enforced on st_size
+    # before any file is read, so a sparse file of that size drives the real refusal
+    # without writing 50MB of bytes to disk.
+    build = tmp_path / "site"
+    build.mkdir()
+    oversize = build / "a.html"
+    with oversize.open("wb") as fh:
+        fh.truncate(_BUILD_TEXT_MAX_BYTES + 1)
+    assert oversize.stat().st_size > _BUILD_TEXT_MAX_BYTES
+
+    result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([A]))
+
+    assert result.exit_code != 0
+    assert "drift detection" in result.output

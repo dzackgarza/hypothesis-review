@@ -1,0 +1,27 @@
+{
+  "id": "5a6b8382-83c7-11f1-a15b-d709357b0094",
+  "tags": [],
+  "text": "Looks good.",
+  "userid": "acct:dzackgarza@localhost",
+  "created": "2026-07-19 23:12:46.355181",
+  "groupid": "nJ6PVQia",
+  "target_uri": "https://arxiv.org/pdf/2312.03638",
+  "target_selectors": [
+    {
+      "end": 2479,
+      "type": "TextPositionSelector",
+      "start": 2176
+    },
+    {
+      "type": "TextQuoteSelector",
+      "exact": "Theorem 1.1. The normalization of F En,2 is a semitoroidal compactification F F En,2 corresponding to a collection F = {Fk}k=1,2,3,4,5 of explicit semifans, one for each 0-cusp of FEn,2, and it is dominated by a toroidal compactification F cox En,2 for a collection Fcox = {Fk cox}k=1,2,3,4,5 of Coxeter fans.",
+      "prefix": ". ZACK GARZA, AND LUCA SCHAFFLER ",
+      "suffix": "In Sections 6, 7 we describe all"
+    },
+    {
+      "type": "PageSelector",
+      "index": 1,
+      "label": "2"
+    }
+  ]
+}

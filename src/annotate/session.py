@@ -1,49 +1,59 @@
 """Session windowing.
 
-A session is the ``review:open`` .. ``review:send`` marker window (see
-:mod:`annotate.models`). :func:`batch_for` collects the *real* annotations that
-fall strictly after an open marker and up to (and including the timestamp of)
-the first send marker following it — markers and already-``acted`` annotations
-are excluded. Pure functions over the ``created``-ordered annotation list.
+A session is a time window: it opens when ``wait`` records the open timestamp locally (no
+h write) and closes when the browser calls the loopback close endpoint.
+:func:`batch_since` collects the *real* annotations created strictly after the open timestamp
+-- already-``acted`` annotations are excluded, as are any ``review:open``/``review:send``
+marker rows left behind by the retired marker-based session protocol (nothing emits them
+anymore; existing rows are data to tolerate, not delete). A pure function over the
+``created``-ordered annotation list.
 """
 
 from __future__ import annotations
 
-from annotate.models import Annotation, Batch
+import pathlib
+from datetime import datetime
 
-OPEN = "review:open"
+from annotate.models import Annotation
+
+#: Where a session's open timestamp is parked, inside the repo's untracked ``.git`` dir so
+#: it isolates per-repo (and per test tmp-repo) and ``pull``/``resolve`` can read it back.
+OPEN_TIME_REL = pathlib.Path(".git") / "annotate" / "open_time"
+
+
+def open_time_path(root: pathlib.Path) -> pathlib.Path:
+    return root / OPEN_TIME_REL
+
+
+def write_open_time(root: pathlib.Path, when: datetime) -> None:
+    """Record a session's open timestamp under the repo's ``.git`` dir (ISO 8601)."""
+    path = open_time_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(when.isoformat(), encoding="utf-8")
+
+
+def read_open_time(root: pathlib.Path) -> datetime | None:
+    """The parked session open timestamp, or ``None`` if no session has been opened."""
+    path = open_time_path(root)
+    if not path.exists():
+        return None
+    return datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+
+
+OPEN = "review:open"  # legacy session-marker tags, no longer emitted; filtered out of windows
 SEND = "review:send"
 ACTED = "acted"
 
 
-class NoSend(Exception):
-    """No ``review:send`` marker exists after the open marker yet."""
+def _is_legacy_marker(ann: Annotation) -> bool:
+    """A leftover ``review:open``/``review:send`` marker row from the retired marker design."""
+    return ann.is_marker(OPEN) or ann.is_marker(SEND)
 
 
-def _is_real(ann: Annotation) -> bool:
-    """A reviewable annotation: neither a marker nor already acted on."""
-    return not (ann.is_marker(OPEN) or ann.is_marker(SEND) or ann.is_marker(ACTED))
+def batch_since(anns: list[Annotation], since: datetime) -> list[Annotation]:
+    """Real annotations created strictly after ``since``.
 
-
-def latest_open(anns: list[Annotation]) -> Annotation | None:
-    """The most recent ``review:open`` marker, or ``None`` if there is none."""
-    opens = [a for a in anns if a.is_marker(OPEN)]
-    return max(opens, key=lambda a: a.created) if opens else None
-
-
-def batch_for(anns: list[Annotation], open_marker: Annotation) -> Batch:
-    """Real annotations in ``open_marker.created < created <= send.created``,
-    where ``send`` is the first ``review:send`` marker after ``open_marker``.
-
-    Raises :class:`NoSend` if the session has not been sent yet.
+    Excludes already-``acted`` annotations and any leftover legacy session markers, so the
+    result is exactly the reviewable feedback that landed during the open session window.
     """
-    sends = [a for a in anns if a.is_marker(SEND) and a.created > open_marker.created]
-    if not sends:
-        raise NoSend(f"no {SEND} marker after open marker {open_marker.id}")
-    send = min(sends, key=lambda a: a.created)
-    window = [
-        a
-        for a in anns
-        if _is_real(a) and open_marker.created < a.created <= send.created
-    ]
-    return Batch(open_marker=open_marker, send_marker=send, annotations=window)
+    return [a for a in anns if a.created > since and not a.is_marker(ACTED) and not _is_legacy_marker(a)]

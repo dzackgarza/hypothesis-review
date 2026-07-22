@@ -1,8 +1,7 @@
-"""h HTTP API client for writes (session markers + ``acted`` tagging).
+"""h HTTP API client for writes (``acted`` tagging).
 
 Reads go through Postgres (``source.py``); only writes use the h HTTP API with a
-developer token. Markers are annotations anchored on a synthetic URI so they
-never collide with real page annotations.
+developer token. The one write is merging the ``acted`` tag onto a resolved annotation.
 """
 
 from __future__ import annotations
@@ -11,7 +10,14 @@ from types import TracebackType
 
 import httpx
 
-MARKER_URI = "urn:annotate:marker"
+
+class ResponseContractError(RuntimeError):
+    """The h API returned a response that violates its own contract.
+
+    Raised instead of coercing missing or malformed required fields into defaults: h's
+    PATCH replaces the tags field wholesale, so a merge built from a coerced empty list
+    would silently destroy the annotation's existing tags.
+    """
 
 
 class HClient:
@@ -28,23 +34,18 @@ class HClient:
             transport=transport,
         )
 
-    def create_marker(self, group_id: str, kind: str) -> str:
-        resp = self._client.post(
-            "/api/annotations",
-            json={"uri": MARKER_URI, "group": group_id, "text": kind, "tags": [kind]},
-        )
-        resp.raise_for_status()
-        return resp.json()["id"]
-
     def tag(self, annotation_id: str, add: list[str]) -> None:
-        # h PATCH replaces the tags field, so merge against the current tags.
+        # h PATCH replaces the tags field, so merge against the current tags. The current
+        # tags must actually be present and well-formed: coercing a malformed response to
+        # [] would make the PATCH wipe the annotation's existing tags.
         current = self._client.get(f"/api/annotations/{annotation_id}")
         current.raise_for_status()
-        existing = current.json().get("tags") or []
+        existing = current.json().get("tags")
+        if not isinstance(existing, list) or not all(isinstance(t, str) for t in existing):
+            msg = f"annotation {annotation_id}: response `tags` is {existing!r}, not a list of strings; refusing to PATCH a merge built from a malformed response"
+            raise ResponseContractError(msg)
         merged = list(dict.fromkeys([*existing, *add]))
-        resp = self._client.patch(
-            f"/api/annotations/{annotation_id}", json={"tags": merged}
-        )
+        resp = self._client.patch(f"/api/annotations/{annotation_id}", json={"tags": merged})
         resp.raise_for_status()
 
     def close(self) -> None:

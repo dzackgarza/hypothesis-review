@@ -1,129 +1,80 @@
-# Annotation → Ledger Review Loop — Design
+# Hypothesis Review Loop
 
-**Status:** design (pre-implementation). Date: 2026-07-18.
+`hypothesis-review` turns annotations made in the self-hosted Hypothesis service into a bounded, git-recorded batch of feedback for an agent.
+Hypothesis owns annotation capture and normalization.
+This project owns session timing, delivery, recording, and resolution.
 
-## Purpose
+## Review workflow
 
-An opinionated review loop for annotating documents — a docs site, and any web page/PDF —
-where feedback is captured in the browser, **batched**, handed to an agent as a coherent
-unit, acted on, and preserved in a **git-anchored, replayable, auditable ledger**. It
-exists to defeat a specific failure model: feedback that is dropped, only partially applied,
-or lost when the document mutates under the reviewer — and to make any past feedback
-**rewindable to the exact document state it was written against**.
+Run the workflow from the git repository being reviewed:
 
-## Non-goals
+1. The agent runs `annotate doctor` and then `annotate wait`.
 
-- Multi-user / concurrent review (solo for now).
-- Reimplementing annotation capture or text anchoring — Hypothesis owns that.
-- A long-lived listener daemon: the agent is woken by its harness, not a persistent socket.
+2. `wait` records the current time under `.git/annotate/open_time` and listens on `http://127.0.0.1:8902/session/close`.
 
-## The loop
+3. The reviewer annotates HTML or PDF content with the browser extension.
 
-```
-agent opens session  →  reviewer annotates freely (any pages)  →  reviewer presses Send
-    →  agent `wait` returns the whole window  →  tee to git ledger (commit-stamped)
-    →  agent acts (edit + commit)  →  tag the batch `acted`  →  document updates
-    →  next session opens clean
-```
+4. The reviewer presses **Send to agent**. The extension posts to the loopback close endpoint; it shows the returned failure description and remains immediately retryable if no session is listening or the endpoint rejects the request.
 
-The **drain-before-act** beat is the load-bearing invariant: the agent is structurally
-forbidden from acting mid-review, so the page never mutates under the reviewer's feet.
+5. `wait` reads annotations created after the local open time, excluding annotations already tagged `acted` and any rows left by the retired marker protocol.
 
-## Session model (window-bounded)
+6. The batch is appended to the repository's JSONL feedback ledger, committed, and only then printed to standard output.
 
-A feedback session is an explicit **`[open, close]` window**, opened by the agent and closed
-by the reviewer.
+7. After acting on the batch, the agent runs `annotate resolve` to add the `acted` tag through the Hypothesis API.
 
-- **Open (agent):** `annotate wait` posts a **session-open marker** to the review group and
-  parks (a harness-tracked background job). The marker is the lower bound and records the
-  **open-commit** — the document state at session start.
-- **Annotate (reviewer):** freely, across as many pages/PDFs as desired. Every annotation
-  lands in the group with its own `target_uri`; nothing is scoped to a single page.
-- **Close (reviewer):** the Send button posts the **drain marker** — the upper bound.
-- **Batch = every annotation in the group created strictly between the two markers,
-  regardless of page.** Cross-page capture is automatic because the filter is the *window*,
-  not the URL.
-- The agent tees the batch, acts, and tags each annotation **`acted`**, so the next session
-  opens clean and a processed batch can never be re-swept.
+The browser request closes only the local waiting process.
+It does not create a marker annotation or write session state to Hypothesis.
 
-The two markers bound the session in `h` and in the ledger (open-commit … send-commit); the
-`acted` tag is the lifecycle flag. Annotations made while no session is open are **not**
-swept by the next session's window — for that ad-hoc case, see `slice`.
+## Ownership and data path
 
-## Components
+- The self-hosted `h` service stores annotations and their normalized quotes.
 
-### 1. Capture — self-hosted Hypothesis
-- `h` runs as the `hypothesis` user systemd service (`localhost:5000`); annotations land in
-  a **private group**.
-- The browser extension is forked (below), built pointed at `localhost:5000`.
-- Hypothesis owns robust text-quote anchoring (exact + prefix/suffix + position) and
-  **orphan detection** (content changed → the annotation visibly detaches) — reused, not
-  rebuilt; that detachment is already half the drift/thrash signal.
+- `PostgresSource` reads the annotation table directly because the observed search-index path is not a reliable source for this workflow.
 
-### 2. Drain gesture — injected floating button (browser-extension fork; small)
-- A **shadow-DOM-isolated floating button**, fixed on the **LHS** (opposite the sidebar),
-  injected on activation, torn down on deactivate. Shows a **pending count**.
-- Hooks: `src/background/sidebar-injector.ts` (injection), `tab-state.ts` (active-tab
-  tracking → mount/unmount), `messages.ts` (click → service worker).
-- Scope: one module in `src/background/` + the worker's drain handler + the badge. **No
-  `hypothesis/client` fork** — the sidebar (npm `hypothesis`) is untouched.
+- `annotate wait` owns the local session lower bound and the loopback close server.
 
-### 3. Signal — marker annotations
-- Open and Send each post a **marker annotation** (reserved tag convention) to the group.
-- The Send marker doubles as the **ledger batch header**: its send-time timestamp maps to
-  the commit-at-send-time. Act-signal and audit-record are one object.
+- The browser extension owns the explicit close gesture and its visible success or error state.
+  HTML pages and the bundled PDF viewer use the same control implementation.
 
-### 4. The CLI (`annotate`, Python)
-Opinionated glue over the h API + git:
-- `wait` — opens a session (posts the open marker) and blocks as a **background job** until
-  the drain marker; exits with the batch on stdout (the harness wakes the same agent).
-  Subscribes to h's websocket (`:5001`) or polls `/api/search`.
-- `pull` — the current window's batch as structured JSON.
-- `slice [--since T] [--until T] [--last DUR] [--uri PAT]` — **read-only, ad-hoc**: return
-  annotations in an arbitrary datetime window, ignoring markers. The escape hatch for
-  "annotated a paper as I read, never opened a session, now synthesize what I marked in the
-  last hour" — timing alone carries the intent.
-- `ledger` — append the batch to the git-tracked JSONL ledger, each annotation stamped with
-  the send-time commit + its W3C target/selector (the content-at-the-time).
-- `resolve` — tag the batch **`acted`** (non-destructive) so it can't re-fire.
-- `status` — pending / open / resolved; per open annotation, whether its anchor still
-  resolves in the current build (drift/thrash detection).
-- `rewind <id>` / `delta <id>` — `git checkout` / `git diff <commit>..HEAD` on the
-  annotation's send-time commit.
+- The repository under review owns `feedback/ledger.jsonl` by default.
+  A caller may select another repo-relative ledger with `--path`.
 
-### 5. The ledger
-Append-only JSONL, git-tracked (in the *reviewed* repo). Each entry is
-[W3C Web Annotation](https://www.w3.org/TR/annotation-model/)-shaped:
+- Git history supplies the code-state anchor for recorded feedback; there is no separate deployment log or version registry.
 
-```
-{ id, session, created,
-  target: { source, selector: [TextQuote{exact,prefix,suffix}, TextPosition, Range] },
-  body, commit,
-  state: open | acted | wontfix,
-  resolution: { commit, note } }
-```
+## Delivery invariants
 
-### 6. Version-anchoring
-- The reviewed repo's deploy writes a **deploy-log** (commit + timestamp per deploy).
-- The tee joins each marker's send-time against the deploy-log → the commit the feedback was
-  written against (never the tee-time HEAD).
-- Rewind = `git checkout <commit>`; delta = `git diff <commit>..HEAD -- <page-source>`.
+- Commands that deliver feedback (`wait`, `pull`, and `record`) require a git repository.
 
-### 7. Agent callback
-`wait` runs as a harness-tracked background job; exits with the batch on stdout; the harness
-notifies the same session. No PTY, no daemon, no `nohup`/`&`.
+- Delivery records before printing.
+  There is no unrecorded delivery mode.
 
-## Settled decisions
+- Ledger entries are deduplicated by annotation ID.
 
-- **Repo home:** this repo — a standalone public repo (`hypothesis-review`) holding the CLI
-  and the extension fork. The **ledger lives in the reviewed repo**, not here.
-- **Resolve mechanism:** a non-destructive **`acted` tag**.
-- **Session scope:** window-bounded (`[open, close]` markers); `slice` covers the ad-hoc
-  no-session case.
+- An annotation with a normalization error is not deliverable or recordable.
+  The command reports the annotation ID and the stored normalization error instead of silently using degraded text.
 
-## Open for the implementation plan
+- Every PDF selection uses the OCR-normalized quote produced by `h`; selected glyphs never bypass OCR. An HTML selection uses identity only when semantic source extraction returns the captured quote unchanged.
 
-- Extension fork layout: GitHub fork of `hypothesis/browser-extension` vs an overlay/subdir
-  here.
-- `wait` transport: h websocket vs polling `/api/search` (marker convention is
-  transport-agnostic; start with whichever is less plumbing).
+- Legacy `review:open` and `review:send` rows are ignored; new sessions never emit them.
+
+## Commands
+
+- `annotate doctor` checks the ambient git repository, configuration, self-hosted API, and Postgres source.
+
+- `annotate wait [--timeout SECONDS] [--path PATH]` opens a local session, waits for the extension, records the resulting batch, and prints it as JSON.
+
+- `annotate pull [--path PATH]` records and prints the batch after the most recently stored local open time without waiting for another close request.
+
+- `annotate slice [--since TIME | --last DURATION] [--until TIME] [--uri URI]` is a read-only view for annotations outside the active review loop.
+
+- `annotate record [--path PATH] ID...` records selected annotations discovered with `slice`.
+
+- `annotate resolve` tags the current batch `acted`.
+
+- `annotate status [--root BUILD_DIR]` reports open and acted counts and can check whether open annotation quotes still occur in a built site.
+
+## Failure boundaries
+
+`annotate wait` times out with an error if the extension does not close the session.
+The extension distinguishes a rejected HTTP response from failure to contact the loopback service and keeps that description visible for retry.
+Normalization failures retain their specific backend description through storage and CLI delivery rather than collapsing into a generic failure.

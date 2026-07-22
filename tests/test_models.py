@@ -1,47 +1,24 @@
-from annotate.models import Annotation, LedgerEntry
+"""Model tests.
+
+``from_pg_row`` is deliberately NOT unit-tested against a hand-built row: a synthetic
+row encodes an assumption about the h schema, and if that assumption is wrong the test
+passes while the real query fails (which is precisely the bug that shipped). The
+column mapping is proved against real rows in ``test_source.py``. Time-window batching is
+proved through ``batch_since`` in ``test_session.py``. What remains here is the ledger's
+own serialization contract.
+"""
+
+from annotate.models import LedgerEntry
 
 
-def _row():
-    return {
-        "id": "anno-1",
-        "created": "2026-07-18T10:00:00",
-        "userid": "acct:dzack@localhost",
-        "groupid": "grp-xyz",
-        "uri": "http://localhost/paper.html",
-        "text": "needs a citation",
-        "tags": ["review:open"],
-        "target": [{"selector": [{"type": "TextQuoteSelector", "exact": "foo"}]}],
-    }
-
-
-def test_from_pg_row_maps_columns():
-    row = _row()
-    ann = Annotation.from_pg_row(row)
-    assert ann.id == "anno-1"
-    assert ann.created == "2026-07-18T10:00:00"
-    assert ann.userid == "acct:dzack@localhost"
-    assert ann.group == "grp-xyz"  # groupid -> group
-    assert ann.uri == "http://localhost/paper.html"
-    assert ann.text == "needs a citation"
-    assert ann.tags == ["review:open"]
-    assert ann.target == row["target"]  # selector JSON passed through verbatim
-
-
-def test_is_marker_true_iff_tag_present():
-    assert Annotation.from_pg_row(_row()).is_marker("review:open") is True
-    plain = _row() | {"tags": ["paperA"]}
-    assert Annotation.from_pg_row(plain).is_marker("review:open") is False
-
-
-def test_ledger_entry_json_round_trip():
+def test_ledger_entry_json_round_trip() -> None:
     entry = LedgerEntry(
-        id="anno-1",
+        id="2362ce89-82a6-11f1-9030-6f51a56e1c15",
         created="2026-07-18T10:00:00",
         uri="http://localhost/paper.html",
         text="needs a citation",
         tags=["review:open"],
-        target=[{"selector": [{"type": "TextQuoteSelector", "exact": "foo"}]}],
-        commit="abc1234",
-        state="open",
+        target=[{"source": "http://localhost/paper.html", "selector": []}],
+        quote="Let $f(x,y)$ be a polynomial",
     )
     assert LedgerEntry.from_json(entry.to_json()) == entry
