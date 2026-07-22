@@ -53,8 +53,7 @@ It does not create a marker annotation or write session state to Hypothesis.
 - An annotation with a normalization error is not deliverable or recordable.
   The command reports the annotation ID and the stored normalization error instead of silently using degraded text.
 
-- Every PDF selection uses the OCR-normalized quote produced by `h`; selected glyphs never bypass OCR.
-  An HTML selection uses identity only when semantic source extraction returns the captured quote unchanged.
+- Every PDF selection uses the OCR-normalized quote produced by `h`; selected glyphs never bypass OCR. An HTML selection uses identity only when semantic source extraction returns the captured quote unchanged.
 
 - Legacy `review:open` and `review:send` rows are ignored; new sessions never emit them.
 
