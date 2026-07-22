@@ -38,7 +38,7 @@ _lock:
 
 [private]
 _serve-session-close:
-    uv run python -c 'from annotate.session_server import wait_for_close; raise SystemExit(0 if wait_for_close(30) else 1)'
+    uv run python -c 'from annotate.session_server import SESSION_CLOSE_PORT, wait_for_close; raise SystemExit(0 if wait_for_close(30, SESSION_CLOSE_PORT) else 1)'
 
 [private]
 _test-source:
@@ -53,18 +53,28 @@ _typecheck:
     just -f ~/ai-review-ci/justfiles/python.just -d . _mypy
 
 # Integrated cross-repo proof (issue #6): drives the real four-branch stack end to end.
-# Prerequisites (fail loudly, never skip): the h dev stack (web on :5000, Postgres,
-# Elasticsearch, broker), the client harness (:3011/:3012), ANNOTATE_* config for this
-# tool, MATHPIX_API_KEY for the PDF OCR legs, and a browser session for the extension
-# legs. Steps: doctor -> live-boundary suite (pg/e2e opt-ins) -> session close over the
-# real loopback -> delivery/ledger reread.
+# Prerequisites (fail loudly, never skip): the h dev stack (web API, Postgres,
+# Elasticsearch, broker) at the configured ANNOTATE_API_URL / ANNOTATE_PG_DSN, the client
+# harness at ANNOTATE_HARNESS_URL, MATHPIX_API_KEY for the PDF OCR legs, and a browser
+# session for the extension legs. No endpoint is guessed: every address the preflight
+# probes comes from that declared configuration. Steps: doctor -> live-boundary suite
+# (pg/e2e opt-ins) -> session close over the real loopback -> delivery/ledger reread.
 proof-integrated:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "=== integrated proof: preflight ==="
+    # Required inputs, validated once here before any proof step runs. The harness base has
+    # no default: a guessed-but-reachable localhost port would prove the run against
+    # whatever happens to be listening rather than the stack under test, so `set -u` plus
+    # `:?` makes an unset value a loud failure.
+    : "${ANNOTATE_HARNESS_URL:?required -- the client harness base URL served by dev-server/run-harness.mjs}"
+    # `annotate doctor` is this tool's config boundary: it loads the total ANNOTATE_* model
+    # and probes the *configured* h API and Postgres, exiting non-zero on any unreachable
+    # dependency. It therefore owns the h-side reachability check outright.
     uv run annotate doctor
-    curl -sf http://localhost:5000/api/ >/dev/null || { echo "FATAL: h API not reachable on :5000 — start the h dev stack first"; exit 1; }
-    curl -sf http://localhost:3012/ >/dev/null || { echo "FATAL: client harness not reachable on :3012 — start dev-server/run-harness.mjs"; exit 1; }
+    # The harness is not part of the annotate config model, so probe it directly. Under
+    # `set -e` a connection failure or non-2xx stops the recipe with curl's own status.
+    curl -sf "${ANNOTATE_HARNESS_URL}" >/dev/null
     echo "=== integrated proof: live-boundary suite (pg opt-in) ==="
     ANNOTATE_PG_IT=1 uv run pytest -q tests/
     echo "=== integrated proof: session close over the real loopback ==="
