@@ -36,6 +36,8 @@ def _ann(id: str, created: datetime, tags: list[str] | None = None) -> Annotatio
 
 
 class _StubSource:
+    """In-memory AnnotationSource honoring the since/until window contract."""
+
     def __init__(self, anns: list[Annotation]) -> None:
         self._anns = anns
 
@@ -46,6 +48,10 @@ class _StubSource:
         until: datetime | None = None,
     ) -> list[Annotation]:
         rows = [a for a in self._anns if a.group == group_id]
+        if since is not None:
+            rows = [a for a in rows if a.created > since]
+        if until is not None:
+            rows = [a for a in rows if a.created <= until]
         return sorted(rows, key=lambda a: a.created)
 
 

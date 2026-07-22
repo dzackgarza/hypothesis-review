@@ -32,7 +32,13 @@ class _CloseHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib dispatch name
         if self.path != "/session/close":
-            self.send_error(HTTPStatus.NOT_FOUND)
+            # A plain send_error carries no CORS headers, so the browser would report an
+            # opaque cross-origin failure instead of the 404; the extension must be able
+            # to distinguish "unknown endpoint" from "session closed".
+            self.log_message("rejected POST to unknown path %s", self.path)
+            self.send_response(HTTPStatus.NOT_FOUND)
+            self._cors_headers()
+            self.end_headers()
             return
         self.server.closed = True
         self.send_response(HTTPStatus.NO_CONTENT)

@@ -1,7 +1,8 @@
 from datetime import datetime
+from pathlib import Path
 
 from annotate.models import Annotation
-from annotate.session import batch_since
+from annotate.session import batch_since, open_time_path, read_open_time, write_open_time
 
 
 def _ann(id: str, created: datetime, tags: list[str] | None = None) -> Annotation:
@@ -40,3 +41,19 @@ def test_batch_since_excludes_legacy_markers() -> None:
 def test_batch_since_is_exclusive_at_the_open_instant() -> None:
     at_open = _ann("at-open", T0)  # created == since is not "after"
     assert batch_since([at_open, A], T0) == [A]
+
+
+def test_open_time_round_trips_through_the_repo_file(tmp_path: Path) -> None:
+    # The parked open timestamp is the single source of truth for "a session is open";
+    # the write/read round-trip must preserve the exact instant.
+    (tmp_path / ".git").mkdir()
+    when = datetime(2026, 7, 20, 12, 34, 56, 789012)
+
+    write_open_time(tmp_path, when)
+
+    assert read_open_time(tmp_path) == when
+    assert open_time_path(tmp_path) == tmp_path / ".git" / "annotate" / "open_time"
+
+
+def test_read_open_time_is_none_when_no_session_was_opened(tmp_path: Path) -> None:
+    assert read_open_time(tmp_path) is None

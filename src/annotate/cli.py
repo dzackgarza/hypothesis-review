@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import pathlib
 import re
+import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -159,6 +161,9 @@ def main(ctx: click.Context) -> None:
     to run outside a git repo -- feedback stays auditable alongside the work it concerns. Run
     `annotate doctor` to check your setup.
     """
+    # Diagnostics (e.g. the session-close server's request log) go to stderr; without a
+    # handler the stdlib logger would silently drop them.
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
     if ctx.obj is None:
         cfg = Config.load()
         ctx.obj = App(
@@ -290,6 +295,7 @@ def resolve(app: App) -> None:
     """Tag the current batch's annotations `acted` via the h API."""
     root = _require_repo()
     anns = _current_batch(app.source, app.group_id, root)
+    _require_normalized(anns, "resolve")
     for ann in anns:
         app.client.tag(ann.id, [ACTED])
     click.echo(f"tagged {len(anns)} annotation(s) {ACTED!r}")
