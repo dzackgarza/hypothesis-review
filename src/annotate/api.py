@@ -31,9 +31,7 @@ class HClient:
         current.raise_for_status()
         existing = current.json().get("tags") or []
         merged = list(dict.fromkeys([*existing, *add]))
-        resp = self._client.patch(
-            f"/api/annotations/{annotation_id}", json={"tags": merged}
-        )
+        resp = self._client.patch(f"/api/annotations/{annotation_id}", json={"tags": merged})
         resp.raise_for_status()
 
     def close(self) -> None:

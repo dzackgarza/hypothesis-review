@@ -30,7 +30,8 @@ def repo_root(cwd: pathlib.Path) -> pathlib.Path | None:
     inside a git repository (the caller bounces on ``None`` — feedback must be tracked)."""
     result = subprocess.run(
         ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         return None
@@ -49,11 +50,7 @@ def resolve(rel_path: pathlib.Path, root: pathlib.Path) -> pathlib.Path:
 def _recorded_ids(ledger_path: pathlib.Path) -> set[str]:
     if not ledger_path.exists():
         return set()
-    return {
-        LedgerEntry.from_json(line).id
-        for line in ledger_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    }
+    return {LedgerEntry.from_json(line).id for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
 def append(annotations: list[Annotation], ledger_path: pathlib.Path) -> list[LedgerEntry]:
@@ -95,5 +92,7 @@ def track(ledger_path: pathlib.Path, message: str) -> None:
     subprocess.run(["git", "-C", d, "add", "--", path], check=True, capture_output=True, text=True)
     subprocess.run(
         ["git", "-C", d, "commit", "--no-verify", "-m", message, "--", path],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
