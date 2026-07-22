@@ -3,8 +3,9 @@
 A session is a time window: it opens when ``wait`` records the open timestamp locally (no
 h write) and closes when the browser calls the loopback close endpoint.
 :func:`batch_since` collects the *real* annotations created strictly after the open timestamp
--- already-``acted`` annotations and any legacy ``review:open``/``review:send`` marker rows
-(a bad design, no longer emitted) are excluded. A pure function over the
+-- already-``acted`` annotations are excluded, as are any ``review:open``/``review:send``
+marker rows left behind by the retired marker-based session protocol (nothing emits them
+anymore; existing rows are data to tolerate, not delete). A pure function over the
 ``created``-ordered annotation list.
 """
 

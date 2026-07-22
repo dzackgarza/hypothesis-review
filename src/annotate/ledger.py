@@ -32,6 +32,7 @@ def repo_root(cwd: pathlib.Path) -> pathlib.Path | None:
         ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
+        timeout=30,
     )
     if result.returncode != 0:
         return None
@@ -89,10 +90,17 @@ def track(ledger_path: pathlib.Path, message: str) -> None:
     """
     d = str(ledger_path.parent)
     path = str(ledger_path)
-    subprocess.run(["git", "-C", d, "add", "--", path], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", d, "add", "--", path],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     subprocess.run(
         ["git", "-C", d, "commit", "--no-verify", "-m", message, "--", path],
         check=True,
         capture_output=True,
         text=True,
+        timeout=30,
     )

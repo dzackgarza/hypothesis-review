@@ -28,6 +28,7 @@ class _CloseHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self._cors_headers()
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib dispatch name
