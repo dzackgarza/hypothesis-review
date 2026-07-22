@@ -324,13 +324,31 @@ def _exact_quotes(target: Any) -> list[str]:
     return quotes
 
 
+#: Upper bound on how much built-site text drift detection will read into memory.
+#: A tree past this size needs a uri->path map, not a bigger buffer.
+_BUILD_TEXT_MAX_BYTES = 50 * 1024 * 1024
+
+
 def _build_text(root: pathlib.Path) -> str:
-    """Concatenated text of every file under ``root`` (the current build)."""
-    # ponytail: naive whole-tree read; map uri->path if builds get large.
+    """Concatenated text of every file under ``root`` (the current build).
+
+    Bounded: the whole tree is read into memory for substring matching, so a tree
+    larger than ``_BUILD_TEXT_MAX_BYTES`` is a loud error rather than a silent
+    memory balloon.
+    """
     parts: list[str] = []
-    for p in root.rglob("*"):
-        if p.is_file():
-            parts.append(p.read_text(encoding="utf-8", errors="ignore"))
+    total = 0
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        total += p.stat().st_size
+        if total > _BUILD_TEXT_MAX_BYTES:
+            raise click.ClickException(
+                f"--root tree exceeds {_BUILD_TEXT_MAX_BYTES // (1024 * 1024)}MB; "
+                "drift detection reads the whole tree into memory and needs a "
+                "smaller build root"
+            )
+        parts.append(p.read_text(encoding="utf-8", errors="ignore"))
     return "\n".join(parts)
 
 

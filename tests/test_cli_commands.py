@@ -195,3 +195,19 @@ def test_doctor_reports_git_repo_and_where_feedback_lands(git_repo: Path) -> Non
     assert "[OK] git repo" in result.stdout
     assert "feedback/ledger.jsonl" in result.stdout  # tells the agent where feedback lands
     assert "[OK] config" in result.stdout
+
+
+def test_status_root_larger_than_the_read_bound_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Drift detection reads the whole tree into memory; past the declared bound that
+    # must be a loud error, not an unbounded memory balloon.
+    monkeypatch.setattr("annotate.cli._BUILD_TEXT_MAX_BYTES", 8)
+    build = tmp_path / "site"
+    build.mkdir()
+    (build / "a.html").write_text("more than eight bytes of build text")
+
+    result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([A]))
+
+    assert result.exit_code != 0
+    assert "drift detection" in result.output
