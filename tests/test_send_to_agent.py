@@ -24,7 +24,6 @@ import json
 import threading
 import uuid
 from collections.abc import Iterator
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +33,7 @@ import pytest
 from click.testing import CliRunner
 
 from annotate.api import HClient
-from annotate.cli import App, main
+from annotate.cli import App, _now, main
 from annotate.config import Config
 from annotate.session import write_open_time
 from annotate.source import PostgresSource
@@ -63,7 +62,7 @@ AUTHORED = r"An Enriques surface satisfies $2K_Z \sim 0$ and $q(Z) = 0$, so it s
 @pytest.mark.pg
 def test_the_agent_receives_the_mathematics_the_reader_highlighted(git_repo: Path, served_page: str, tagged: str) -> None:
     cfg = Config.load()
-    write_open_time(git_repo, datetime.now())  # the session the browser opens
+    write_open_time(git_repo, _now())  # the session the browser opens, on h's clock
     _annotate(cfg, served_page, tagged, "this is the definition I meant")
 
     result = CliRunner().invoke(main, ["pull"], obj=_live_app(cfg))
@@ -82,7 +81,7 @@ def test_the_agent_never_receives_the_browser_s_flattened_capture(git_repo: Path
     # The failure this whole path exists to prevent: an agent acting on "2KZ∼0", which is
     # not mathematics anyone can read, act on, or paste back into a document.
     cfg = Config.load()
-    write_open_time(git_repo, datetime.now())
+    write_open_time(git_repo, _now())
     _annotate(cfg, served_page, tagged, "note")
 
     result = CliRunner().invoke(main, ["pull"], obj=_live_app(cfg))
@@ -98,7 +97,7 @@ def test_a_whole_session_of_notes_arrives_as_one_batch(git_repo: Path, served_pa
     # during the session arrives together, in the order they wrote it, each with its own
     # recovered quote.
     cfg = Config.load()
-    write_open_time(git_repo, datetime.now())
+    write_open_time(git_repo, _now())
     _annotate(cfg, served_page, tagged, "first", exact=CAPTURED)
     _annotate(cfg, served_page, tagged, "second", exact="Its universal cover is a K3 surface X")
 

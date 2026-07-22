@@ -6,7 +6,7 @@ throwaway ``git_repo`` fixture. Stubs supply annotation data via ``ctx.obj``.
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,11 @@ class _StubClient(HClient):
         self.tagged.append((annotation_id, list(add)))
 
 
+def _h_now() -> datetime:
+    """Now on h's clock: ``annotation.created`` is UTC, and naive as the column returns it."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 def _app(anns: list[Annotation], client: HClient | None = None) -> App:
     return App(source=_StubSource(anns), client=client or _StubClient(), group_id="grp")
 
@@ -76,7 +81,9 @@ SEND_M = _ann("send", 4, ["review:send"])
 
 
 def test_slice_last_returns_only_in_window_non_markers() -> None:
-    now = datetime.now()
+    # Stamped the way h stamps `annotation.created`, which is the clock the window is
+    # measured on: a fixture on the local clock proves nothing off UTC (#16).
+    now = _h_now()
     recent = _ann("recent", now - timedelta(minutes=30))
     old = _ann("old", now - timedelta(hours=2))
     marker = _ann("open", now - timedelta(minutes=20), ["review:open"])
@@ -86,7 +93,7 @@ def test_slice_last_returns_only_in_window_non_markers() -> None:
 
 
 def test_slice_points_at_record_for_preservation() -> None:
-    now = datetime.now()
+    now = _h_now()
     recent = _ann("recent", now - timedelta(minutes=30))
     result = CliRunner().invoke(main, ["slice", "--last", "1h"], obj=_app([recent]))
     assert result.exit_code == 0, result.output

@@ -18,7 +18,7 @@ import pathlib
 import re
 import sys
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import click
@@ -63,6 +63,17 @@ class App:
     client: HClient
     group_id: str
     cfg: Config | None = None
+
+
+def _now() -> datetime:
+    """The current time on the clock h writes ``annotation.created`` on: UTC, naive.
+
+    Every window this tool computes is compared against that column, so it has to be read
+    from the same clock. Taking the local one instead moves every window by the machine's
+    offset -- east of Greenwich that empties every session, silently, because notes written
+    during it are stamped before it opened (hypothesis-review#16).
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _park(timeout: int, port: int) -> bool:
@@ -205,7 +216,7 @@ def wait(app: App, timeout: int, port: int, rel_path: str | None) -> None:
     delivers the real annotations created during the window when the extension calls it.
     """
     root = _require_repo()  # bounce before opening a session whose batch we could not record
-    write_open_time(root, datetime.now())
+    write_open_time(root, _now())
     if not _park(timeout, port):
         raise click.ClickException(f"timed out after {timeout}s waiting for the browser session-close request")
     _deliver(_current_batch(app.source, app.group_id, root), rel_path)
@@ -263,7 +274,7 @@ def slice_(
     if last is not None:
         if since is not None:
             raise click.UsageError("--last and --since are mutually exclusive")
-        since = datetime.now() - _parse_last(last)
+        since = _now() - _parse_last(last)
     anns = [a for a in app.source.list(app.group_id, since, until) if _not_marker(a)]
     if uri is not None:
         anns = [a for a in anns if a.uri == uri]
