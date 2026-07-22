@@ -84,7 +84,11 @@ class Annotation:
         normalized_quote = row.get("normalized_quote")
         normalization_error = None
         if raw_quote and normalized_quote is None:
-            normalization_error = "h has no normalized quote for this highlighted annotation; run `hypothesis normalize-annotations` on the h deployment and inspect the reported diagnostic"
+            normalization_error = (
+                "h has no normalized quote for this highlighted annotation; run "
+                "`hypothesis normalize-annotations` on the h deployment and inspect "
+                "the reported diagnostic"
+            )
         return cls(
             id=_public_id(row["id"]),
             created=row["created"],
