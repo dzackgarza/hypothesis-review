@@ -19,10 +19,20 @@ from typing import Any
 
 #: Attached to a highlighted annotation for which h holds no usable normalized quote, and
 #: carried into the refusal every delivering command raises. It is the operator's whole
-#: recovery path, so it has to name the remediation precisely enough to be run.
+#: recovery path, so the invocation it names has to be one that actually runs: h publishes
+#: no ``hypothesis`` executable and no console-script entry point, so the subcommand is
+#: reachable only as the package's ``__main__``, and it needs the deployment's own settings
+#: because bootstrapping the app requires them. The remediation also runs somewhere else --
+#: the h checkout behind the configured API, not the repository annotate is being run in --
+#: so the message has to say where, or it sends the reader to the wrong tree.
 _NO_USABLE_NORMALIZED_QUOTE = (
-    "h holds no usable normalized quote for this highlighted annotation (missing, empty, or blank); run "
-    "`hypothesis normalize-annotations` on the h deployment and inspect the reported diagnostic"
+    "h holds no usable normalized quote for this highlighted annotation (missing, empty, or blank). "
+    "Normalization belongs to h, not to annotate, so the backfill runs on the h deployment this tool reads from: "
+    "from that checkout, using the interpreter h is installed into and that deployment's environment (the same "
+    "settings variables its web process runs with, DATABASE_URL among them), run "
+    "`python -m h --dev normalize-annotations` -- `--dev` selects conf/development.ini -- and read the "
+    "per-annotation diagnostics it prints for the ones it could not normalize. There is no `hypothesis` "
+    "executable to run; the CLI is only reachable as the h package's __main__."
 )
 
 
