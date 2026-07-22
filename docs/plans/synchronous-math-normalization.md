@@ -2,9 +2,14 @@
 
 > Tier: implementation-adjacent
 > Parent plan: root / user-facing
-> Externalized fit: private — two feature branches in scope (h fork, client fork). hypothesis-review
->   is reverted-to-original only; its CLI/review-loop rework is a **separate later task**.
-> Status: **design fully locked with the user; final go-ahead pending. No code until approved.**
+> Externalized fit: private — two feature branches in scope (h fork, client fork).
+> Status: **historical design record.** The h/client work it scopes is implemented on the
+>   fork branches (h PR #1, client PR #2), and the hypothesis-review CLI rework it deferred
+>   ("separate later task") has since landed on this branch (PR #8): marker mechanism
+>   dropped for time-window sessions, `normalized_quote` consumed from h,
+>   `mathquote.py`/`pdfmath.py`/`enrich.py` retired. The invariants below (backend-owned
+>   normalization, never-raw display, fail-hard) remain the live contract; the scoping
+>   notes are kept as written for provenance.
 
 ## Purpose / Observable Result
 - A researcher annotates rendered math (an arXiv PDF region, or a KaTeX/LaTeXML/Pandoc HTML page).
