@@ -44,7 +44,20 @@ via Playwright under Xvfb.
   in-window annotation (`__proof_click`, and again `__proof_fullflow` on a fresh
   profile) and recorded it to the ledger.
 
-Not proven here: Mathpix OCR legs (PDF and source-less-HTML) — no `MATHPIX_API_KEY` on
-this machine; the failed-recovery leg above exercises that path's fail-loud contract
-instead. Realtime websocket fan-out (memory broker) is likewise out of scope of these
+## Mathpix OCR legs (added after a real key was provided)
+
+- **Source-less HTML OCR**: a selection outside `<main>` (invisible to the source
+  extractor) on a page with `E = mc<sup>2</sup>` → rendered-region capture via Chromium →
+  real Mathpix → stored `the energy satisfies $\mathrm{E}=\mathrm{mc}^{2}$ in this
+  footnote` (`method=ocr`).
+- **PDF OCR**: a Chromium-printed PDF with `∫₀¹ f(x) dx = 2` in the text flow, annotated
+  with TextQuote+PageSelector via the live API → stored `The residue theorem gives
+  $\int_{0}{ }^{1} f(x) d x=2$ which completes the argument` — exactly the selection,
+  inline `$…$` LaTeX.
+- The live PDF leg surfaced **two real crop bugs**, each fixed red→green in h:
+  punctuation-only page words shifted the crop projection one word short
+  (a22f03249 → 9e9e31ef1), and the trim only cut trailing over-capture, persisting
+  leading prose from the crop's first line (bb07a9f82 → db449febf).
+
+Not proven here: realtime websocket fan-out (memory broker) is out of scope of these
 claims.
