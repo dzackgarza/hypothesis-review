@@ -85,11 +85,18 @@ def _park(timeout: int) -> bool:
 
 
 def _current_batch(source: AnnotationSource, group_id: str, root: pathlib.Path) -> list[Annotation]:
-    """The real annotations created since this repo's open session started, or ``[]`` when no
-    session is open."""
+    """The real annotations created since this repo's open session started.
+
+    A missing open timestamp means no session was ever opened here: that is an error, not
+    an empty delivery -- returning ``[]`` would let ``pull``/``resolve`` report success for
+    a review window that never existed (hypothesis-review#7).
+    """
     since = _read_open_time(root)
     if since is None:
-        return []
+        raise click.ClickException(
+            "no review session is open in this repository -- run `annotate wait` "
+            "(or open a session from the browser) before pulling or resolving"
+        )
     return batch_since(source.list(group_id), since)
 
 
