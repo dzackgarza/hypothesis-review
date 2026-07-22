@@ -2,25 +2,39 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+log = logging.getLogger(__name__)
 
-class _CloseHandler(BaseHTTPRequestHandler):
+
+class _CloseServer(HTTPServer):
+    """Loopback server whose ``closed`` flag the handler flips on a close request.
+
+    The flag lives on the server instance (one per ``wait_for_close`` call), not on the
+    handler class: handlers are constructed per request, and class-level state would be
+    shared between concurrent or successive servers.
+    """
+
     closed = False
 
-    def handle_options(self) -> None:
+
+class _CloseHandler(BaseHTTPRequestHandler):
+    server: _CloseServer
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib dispatch name
         self.send_response(HTTPStatus.NO_CONTENT)
         self._cors_headers()
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.end_headers()
 
-    def handle_post(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802 - stdlib dispatch name
         if self.path != "/session/close":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        type(self).closed = True
+        self.server.closed = True
         self.send_response(HTTPStatus.NO_CONTENT)
         self._cors_headers()
         self.end_headers()
@@ -28,20 +42,18 @@ class _CloseHandler(BaseHTTPRequestHandler):
     def _cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
 
-    def log_message(self, _format: str, *_args: object) -> None:
-        return
-
-
-setattr(_CloseHandler, "do_OPTIONS", _CloseHandler.handle_options)
-setattr(_CloseHandler, "do_POST", _CloseHandler.handle_post)
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib signature
+        # Route the stdlib server's request/error lines through logging instead of
+        # letting them interleave with the CLI's stdout protocol -- but never discard
+        # them: a rejected or malformed close request must leave a trace.
+        log.info("session-close server: %s", format % args)
 
 
 def wait_for_close(timeout: float, port: int = 8902) -> bool:
     """Serve the session-close endpoint until called or ``timeout`` expires."""
-    _CloseHandler.closed = False
     deadline = time.monotonic() + timeout
-    with HTTPServer(("127.0.0.1", port), _CloseHandler) as server:
-        while not _CloseHandler.closed:
+    with _CloseServer(("127.0.0.1", port), _CloseHandler) as server:
+        while not server.closed:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
