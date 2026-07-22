@@ -392,26 +392,47 @@ def status(app: App, root: pathlib.Path | None) -> None:
             click.echo(f"{'match' if matches else 'drift'}\t{a.id}\t{a.uri}")
 
 
-def _h_reachable(api_url: str) -> str:
+#: The status h's API root serves when the service is up. Readiness is stated positively:
+#: this status is ready and every other one is not, so no status is accepted by omission.
+_H_SERVING_STATUS = 200
+
+
+def _h_serving(api_url: str) -> tuple[bool, str]:
+    """Whether the configured h API is serving, and the detail to report.
+
+    Answering is not serving. A proxy in front of a dead app answers 502, a misconfigured
+    deployment answers 500: those are responses, and calling them readiness hands the
+    operator a session that cannot work while claiming the environment was checked.
+    """
     resp = httpx.get(f"{api_url.rstrip('/')}/api/", timeout=3.0)
-    return f"reachable (HTTP {resp.status_code})"
+    if resp.status_code == _H_SERVING_STATUS:
+        return True, f"serving (HTTP {resp.status_code})"
+    return False, f"answered HTTP {resp.status_code} -- responding, but not serving"
 
 
-def _pg_reachable(dsn: str) -> str:
+def _pg_serving(dsn: str) -> tuple[bool, str]:
+    """Whether the configured Postgres is serving, and the detail to report. Connecting is
+    not serving either: the readiness claim is that it answers a query with the right value."""
     with psycopg.connect(dsn, connect_timeout=3) as conn, conn.cursor() as cur:
         cur.execute("SELECT 1")
-        cur.fetchone()
-    return "reachable"
+        [(value,)] = cur.fetchall()
+    return value == 1, f"serving (SELECT 1 -> {value})"
 
 
-def _probe(label: str, thunk: Callable[[], str]) -> tuple[bool, str, str]:
-    """Run a diagnostic connection probe and render its outcome as a status row. A doctor
-    check must report an unreachable dependency as status, not crash on it -- the tool's one
-    sanctioned error-to-status boundary."""
+def _probe(label: str, thunk: Callable[[], tuple[bool, str]]) -> tuple[bool, str, str]:
+    """Run a readiness probe and render its outcome as a status row.
+
+    Three outcomes, kept apart: serving, answered-but-not-serving (the probe's own verdict),
+    and no response at all. The last is the tool's one sanctioned error-to-status boundary --
+    an absent dependency is a doctor result, not a crash -- and it is not allowed to absorb
+    the middle one, because "the deployment is up and broken" and "the deployment is not
+    there" are different problems for the operator to act on.
+    """
     try:
-        return True, label, thunk()
+        ready, detail = thunk()
     except (httpx.HTTPError, psycopg.Error, OSError) as exc:
-        return False, label, (str(exc).splitlines() or [type(exc).__name__])[0]
+        return False, label, f"no response: {(str(exc).splitlines() or [type(exc).__name__])[0]}"
+    return ready, label, detail
 
 
 @main.command()
@@ -435,8 +456,8 @@ def doctor(app: App) -> None:
         rows.append((False, "config", "configuration was not loaded"))
     else:
         rows.append((True, "config", f"group {cfg.group_id}, api {cfg.api_url}"))
-        rows.append(_probe("h API", lambda: _h_reachable(cfg.api_url)))
-        rows.append(_probe("Postgres", lambda: _pg_reachable(cfg.pg_dsn)))
+        rows.append(_probe("h API", lambda: _h_serving(cfg.api_url)))
+        rows.append(_probe("Postgres", lambda: _pg_serving(cfg.pg_dsn)))
 
     for ok, label, detail in rows:
         click.echo(f"[{'OK' if ok else 'FAIL'}] {label}: {detail}")

@@ -5,13 +5,14 @@ throwaway ``git_repo`` fixture. Stubs supply annotation data via ``ctx.obj``.
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from click.testing import CliRunner
-from conftest import committed_at_head
+from conftest import committed_at_head, free_port, http_service
 
 from annotate.api import HClient
 from annotate.cli import _BUILD_TEXT_MAX_BYTES, App, main
@@ -251,6 +252,71 @@ def test_doctor_reports_git_repo_and_where_feedback_lands(git_repo: Path) -> Non
     assert "[OK] git repo" in result.stdout
     assert "feedback/ledger.jsonl" in result.stdout  # tells the agent where feedback lands
     assert "[OK] config" in result.stdout
+
+
+_DOCTOR_ROW = re.compile(r"^\[(OK|FAIL)] ([^:]+): (.*)$")
+
+
+def _doctor_rows(output: str) -> dict[str, tuple[bool, str]]:
+    """doctor's report parsed back into its per-check verdicts: label -> (ready, detail)."""
+    matched = (_DOCTOR_ROW.match(line) for line in output.splitlines())
+    return {m.group(2): (m.group(1) == "OK", m.group(3)) for m in matched if m is not None}
+
+
+def _doctor_app(api_url: str) -> App:
+    """An App whose h API points at ``api_url`` and whose Postgres points at a closed port,
+    so each doctor row's verdict is attributable to the dependency it names."""
+    return App(
+        source=_StubSource([]),
+        client=_StubClient(),
+        group_id="g",
+        cfg=Config(api_url=api_url, pg_dsn=f"postgresql://127.0.0.1:{free_port()}/none", group_id="g", token="6879-x"),
+    )
+
+
+def test_doctor_reports_an_h_that_answers_with_an_error_status_as_not_ready(git_repo: Path) -> None:
+    # A deployment that answers 503 is answering, and answering is not serving. Reporting it
+    # ready passes the gate and hands the operator a session that cannot work, so the very
+    # thing whose job is to tell them the truth up front has misled them.
+    with http_service(503) as api_url:
+        result = CliRunner().invoke(main, ["doctor"], obj=_doctor_app(api_url))
+
+    ready, detail = _doctor_rows(result.stdout)["h API"]
+    assert ready is False
+    assert "503" in detail  # the answer it actually got, not a verdict that discards it
+
+
+def test_doctor_separates_an_error_response_from_no_response_at_all(git_repo: Path) -> None:
+    # Different operator problems: one deployment is up and broken, the other is not there.
+    # Collapsing them costs the operator the first move in diagnosing either.
+    with http_service(503) as api_url:
+        answered = CliRunner().invoke(main, ["doctor"], obj=_doctor_app(api_url)).stdout
+    silent = CliRunner().invoke(main, ["doctor"], obj=_doctor_app(f"http://127.0.0.1:{free_port()}")).stdout
+
+    answered_ready, answered_detail = _doctor_rows(answered)["h API"]
+    silent_ready, silent_detail = _doctor_rows(silent)["h API"]
+    assert (answered_ready, silent_ready) == (False, False)
+    assert "503" in answered_detail
+    assert "503" not in silent_detail
+
+
+@pytest.mark.e2e
+def test_doctor_reports_the_live_serving_deployment_ready(git_repo: Path) -> None:
+    # The positive half of the same judgement, against the real configured stack: readiness
+    # is stated positively, so a serving h and a serving Postgres must both come back ready
+    # and the gate must let the session proceed.
+    cfg = Config.load()
+    app = App(source=_StubSource([]), client=_StubClient(), group_id=cfg.group_id, cfg=cfg)
+
+    result = CliRunner().invoke(main, ["doctor"], obj=app)
+
+    assert {label: ready for label, (ready, _) in _doctor_rows(result.stdout).items()} == {
+        "git repo": True,
+        "config": True,
+        "h API": True,
+        "Postgres": True,
+    }
+    assert result.exit_code == 0, result.output
 
 
 def test_status_root_larger_than_the_read_bound_exits_nonzero(tmp_path: Path) -> None:

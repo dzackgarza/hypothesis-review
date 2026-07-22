@@ -6,9 +6,16 @@ commands resolve the repo from the current working directory.
 """
 
 import os
+import socket
 import subprocess
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
 #: Live-boundary opt-in flags, as declared next to the markers in pyproject.toml. The
@@ -68,3 +75,62 @@ def committed_at_head(repo: Path) -> str:
         capture_output=True,
         text=True,
     ).stdout
+
+
+def free_port() -> int:
+    """A loopback port nothing is bound to."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@contextmanager
+def http_service(status: int) -> Iterator[str]:
+    """A real HTTP service on loopback answering every request with ``status``.
+
+    Not a stand-in for anything under test: it is a genuine server, so the probe under test
+    makes a real request over a real socket and sees a real response. It exists because a
+    deployment that answers but is not serving (502/503 from a proxy in front of a dead app,
+    500 from a misconfigured one) is the state the probe has to get right, and the live
+    stack cannot be put into that state on demand. Yields its base URL.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler's dispatch name
+            self.send_response(status)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+def close_the_session(port: int, statuses: list[int]) -> threading.Thread:
+    """Post the browser extension's real session-close request as soon as ``wait`` serves it.
+
+    Runs off-thread because ``wait`` blocks the invoking thread on the loopback server; the
+    retry loop covers the gap between the caller starting this thread and the server binding.
+    Records the response status so the caller can assert the endpoint -- not merely the
+    return value of a substituted function -- is what released the command.
+    """
+
+    def post() -> None:
+        with httpx.Client() as client:
+            for _attempt in range(200):
+                try:
+                    statuses.append(client.post(f"http://127.0.0.1:{port}/session/close").status_code)
+                    return
+                except httpx.ConnectError:
+                    threading.Event().wait(0.01)
+            raise AssertionError(f"annotate wait never served the session-close endpoint on port {port}")
+
+    thread = threading.Thread(target=post, daemon=True)
+    thread.start()
+    return thread

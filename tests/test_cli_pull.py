@@ -12,14 +12,12 @@ are stubbed via ``ctx.obj``.
 
 import json
 import socket
-import threading
 from datetime import datetime
 from pathlib import Path
 
-import httpx
 import pytest
 from click.testing import CliRunner
-from conftest import committed_at_head
+from conftest import close_the_session, committed_at_head, free_port
 
 from annotate.api import HClient
 from annotate.cli import App, main
@@ -82,36 +80,6 @@ FUTURE_B = _ann("b", datetime(2099, 1, 1, 0, 0, 2))
 
 def _app(anns: list[Annotation], client: HClient | None = None) -> App:
     return App(source=_StubSource(anns), client=client or _StubClient(), group_id="grp")
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _close_the_session(port: int, statuses: list[int]) -> threading.Thread:
-    """Post the browser extension's real session-close request as soon as ``wait`` serves it.
-
-    Runs off-thread because ``wait`` blocks the invoking thread on the loopback server; the
-    retry loop covers the gap between the test starting this thread and the server binding.
-    Records the response status so the caller can assert the endpoint -- not merely the
-    return value of a substituted function -- is what released the command.
-    """
-
-    def post() -> None:
-        with httpx.Client() as client:
-            for _attempt in range(200):
-                try:
-                    statuses.append(client.post(f"http://127.0.0.1:{port}/session/close").status_code)
-                    return
-                except httpx.ConnectError:
-                    threading.Event().wait(0.01)
-            raise AssertionError(f"annotate wait never served the session-close endpoint on port {port}")
-
-    thread = threading.Thread(target=post, daemon=True)
-    thread.start()
-    return thread
 
 
 def _ledger_ids(repo: Path) -> list[str]:
@@ -204,9 +172,9 @@ def test_pull_with_an_open_session_and_no_new_annotations_prints_an_empty_batch(
 def test_wait_delivers_the_batch_when_the_browser_closes_the_session(git_repo: Path) -> None:
     # The wake is a real POST to the loopback session-close endpoint the command serves,
     # so this exercises the same path the extension drives: park -> serve -> close -> deliver.
-    port = _free_port()
+    port = free_port()
     statuses: list[int] = []
-    closer = _close_the_session(port, statuses)
+    closer = close_the_session(port, statuses)
     client = _StubClient()
 
     result = CliRunner().invoke(
@@ -229,7 +197,7 @@ def test_wait_times_out_when_the_session_is_never_closed(git_repo: Path) -> None
     # must deliver nothing, since an unclosed session never defined a review window.
     result = CliRunner().invoke(
         main,
-        ["wait", "--timeout", "1", "--port", str(_free_port())],
+        ["wait", "--timeout", "1", "--port", str(free_port())],
         obj=_app([FUTURE_A, FUTURE_B]),
     )
     assert result.exit_code != 0
