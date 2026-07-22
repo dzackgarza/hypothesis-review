@@ -16,7 +16,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-
 #: Attached to a highlighted annotation for which h holds no usable normalized quote, and
 #: carried into the refusal every delivering command raises. It is the operator's whole
 #: recovery path, so the invocation it names has to be one that actually runs: h publishes
@@ -100,16 +99,17 @@ class Annotation:
         """
         tq = _text_quote(row["target_selectors"])
         raw_quote = tq["exact"] if "exact" in tq else ""
-        normalized_quote = row.get("normalized_quote")
+        normalized_quote: str | None = row.get("normalized_quote")
         # "Normalized" has to mean a quote an agent can actually work with, because that is
         # what the tool promises when it hands an annotation on. A normalization that
         # produced an empty or blank value is not absent in the database sense, but it
         # carries no more quotable text than a missing row does; treating only the null
         # state as a failure would deliver a highlight with nothing to quote and no error,
-        # which is the exact outcome the guarantee exists to prevent.
-        usable = normalized_quote is not None and normalized_quote.strip() != ""
+        # which is the exact outcome the guarantee exists to prevent. One value carries
+        # both facts: the usable quote, empty exactly when there is none.
+        usable_quote = normalized_quote if normalized_quote is not None and normalized_quote.strip() != "" else ""
         normalization_error = None
-        if raw_quote and not usable:
+        if raw_quote and not usable_quote:
             normalization_error = _NO_USABLE_NORMALIZED_QUOTE
         return cls(
             id=_public_id(row["id"]),
@@ -120,7 +120,7 @@ class Annotation:
             text=row["text"],
             tags=list(row["tags"] or []),
             target=[{"source": row["target_uri"], "selector": row["target_selectors"]}],
-            quote=normalized_quote if usable else "",
+            quote=usable_quote,
             quote_prefix=tq["prefix"] if "prefix" in tq else "",
             quote_suffix=tq["suffix"] if "suffix" in tq else "",
             page_index=_page_index_of(row["target_selectors"]),

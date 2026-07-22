@@ -342,7 +342,8 @@ def _file_text(path: pathlib.Path) -> str:
         return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise click.ClickException(
-            f"{path}: byte {exc.start} is not valid UTF-8 ({exc.reason}). Drift detection compares every file under --root as text and will not derive a match/drift verdict from bytes it cannot decode. Point --root at the build's text output, or remove the non-text file."
+            f"{path}: byte {exc.start} is not valid UTF-8 ({exc.reason}). Drift detection compares every file under --root as text and will not derive a "
+            "match/drift verdict from bytes it cannot decode. Point --root at the build's text output, or remove the non-text file."
         ) from exc
 
 

@@ -209,7 +209,7 @@ def test_status_root_still_derives_verdicts_from_a_decodable_tree(tmp_path: Path
     # refusing text trees, so the same tree with the byte replaced still yields both verdicts.
     build = tmp_path / "site"
     build.mkdir()
-    (build / "asset.bin").write_bytes("vanished text".encode())
+    (build / "asset.bin").write_bytes(b"vanished text")
     (build / "a.html").write_text("... the exact quote a is still here ...")
     spliced = Annotation(
         id="spliced",
