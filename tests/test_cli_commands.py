@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from conftest import committed_at_head
 
 from annotate.api import HClient
-from annotate.cli import App, main
+from annotate.cli import _BUILD_TEXT_MAX_BYTES, App, main
 from annotate.config import Config
 from annotate.models import Annotation
 from annotate.session import write_open_time
@@ -196,13 +196,18 @@ def test_doctor_reports_git_repo_and_where_feedback_lands(git_repo: Path) -> Non
     assert "[OK] config" in result.stdout
 
 
-def test_status_root_larger_than_the_read_bound_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_root_larger_than_the_read_bound_exits_nonzero(tmp_path: Path) -> None:
     # Drift detection reads the whole tree into memory; past the declared bound that
-    # must be a loud error, not an unbounded memory balloon.
-    monkeypatch.setattr("annotate.cli._BUILD_TEXT_MAX_BYTES", 8)
+    # must be a loud error, not an unbounded memory balloon. Proven against the real
+    # production bound and a genuinely oversized tree: the bound is enforced on st_size
+    # before any file is read, so a sparse file of that size drives the real refusal
+    # without writing 50MB of bytes to disk.
     build = tmp_path / "site"
     build.mkdir()
-    (build / "a.html").write_text("more than eight bytes of build text")
+    oversize = build / "a.html"
+    with oversize.open("wb") as fh:
+        fh.truncate(_BUILD_TEXT_MAX_BYTES + 1)
+    assert oversize.stat().st_size > _BUILD_TEXT_MAX_BYTES
 
     result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([A]))
 

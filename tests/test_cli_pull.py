@@ -3,15 +3,20 @@
 Both record the delivered batch into the git ledger *before* printing it, and bounce unless
 run inside a git repo. A session is a time window: ``pull`` reads the open timestamp parked
 under ``.git/annotate/open_time`` and delivers the real annotations created since it; ``wait``
-parks that timestamp, blocks in ``_park`` until the harness wakes it, then delivers. Tests
-monkeypatch ``_park`` rather than racing a real signal. Source and client are stubbed via
-``ctx.obj``.
+parks that timestamp, then serves the loopback session-close endpoint until the browser
+posts to it. The ``wait`` tests drive that endpoint for real -- ``--port`` puts the served
+socket under the test's control, so the wake, the timeout, and the never-served case are
+observed at the real boundary rather than through a substituted ``_park``. Source and client
+are stubbed via ``ctx.obj``.
 """
 
 import json
+import socket
+import threading
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from click.testing import CliRunner
 from conftest import committed_at_head
@@ -77,6 +82,36 @@ FUTURE_B = _ann("b", datetime(2099, 1, 1, 0, 0, 2))
 
 def _app(anns: list[Annotation], client: HClient | None = None) -> App:
     return App(source=_StubSource(anns), client=client or _StubClient(), group_id="grp")
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _close_the_session(port: int, statuses: list[int]) -> threading.Thread:
+    """Post the browser extension's real session-close request as soon as ``wait`` serves it.
+
+    Runs off-thread because ``wait`` blocks the invoking thread on the loopback server; the
+    retry loop covers the gap between the test starting this thread and the server binding.
+    Records the response status so the caller can assert the endpoint -- not merely the
+    return value of a substituted function -- is what released the command.
+    """
+
+    def post() -> None:
+        with httpx.Client() as client:
+            for _attempt in range(200):
+                try:
+                    statuses.append(client.post(f"http://127.0.0.1:{port}/session/close").status_code)
+                    return
+                except httpx.ConnectError:
+                    threading.Event().wait(0.01)
+            raise AssertionError(f"annotate wait never served the session-close endpoint on port {port}")
+
+    thread = threading.Thread(target=post, daemon=True)
+    thread.start()
+    return thread
 
 
 def _ledger_ids(repo: Path) -> list[str]:
@@ -166,35 +201,53 @@ def test_pull_with_an_open_session_and_no_new_annotations_prints_an_empty_batch(
     assert json.loads(result.stdout) == []
 
 
-def test_wait_parks_open_time_then_records_and_prints_batch(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("annotate.cli._park", lambda timeout: True)  # harness woke us
+def test_wait_delivers_the_batch_when_the_browser_closes_the_session(git_repo: Path) -> None:
+    # The wake is a real POST to the loopback session-close endpoint the command serves,
+    # so this exercises the same path the extension drives: park -> serve -> close -> deliver.
+    port = _free_port()
+    statuses: list[int] = []
+    closer = _close_the_session(port, statuses)
     client = _StubClient()
-    result = CliRunner().invoke(main, ["wait"], obj=_app([PAST, FUTURE_A, FUTURE_B], client=client))
+
+    result = CliRunner().invoke(
+        main,
+        ["wait", "--timeout", "20", "--port", str(port)],
+        obj=_app([PAST, FUTURE_A, FUTURE_B], client=client),
+    )
+    closer.join(timeout=5)
+
     assert result.exit_code == 0, result.output
+    assert statuses == [204]  # the served endpoint answered the browser's close request
     assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]
     assert (git_repo / ".git" / "annotate" / "open_time").exists()  # open time parked locally
     assert client.tagged == []  # wait makes no h write
     assert _ledger_ids(git_repo) == ["a", "b"]  # batch recorded
 
 
-def test_wait_times_out_without_a_wake(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("annotate.cli._park", lambda timeout: False)  # nobody woke us
-    result = CliRunner().invoke(main, ["wait", "--timeout", "1"], obj=_app([FUTURE_A, FUTURE_B]))
+def test_wait_times_out_when_the_session_is_never_closed(git_repo: Path) -> None:
+    # Nobody posts to the served endpoint: the command runs the real timeout to expiry and
+    # must deliver nothing, since an unclosed session never defined a review window.
+    result = CliRunner().invoke(
+        main,
+        ["wait", "--timeout", "1", "--port", str(_free_port())],
+        obj=_app([FUTURE_A, FUTURE_B]),
+    )
     assert result.exit_code != 0
     assert "timed out" in result.stderr
     assert _ledger_ids(git_repo) == []  # nothing delivered on timeout
 
 
 def test_wait_bounces_before_parking_outside_a_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The port is held by this test for the whole call. Reaching the parking step would
+    # therefore fail loudly on the bind -- so the repo-check message is proof that `wait`
+    # bounced before ever opening a session it could not record.
     monkeypatch.chdir(tmp_path)
-    parked: list[bool] = []
+    with socket.socket() as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        port = int(held.getsockname()[1])
+        result = CliRunner().invoke(main, ["wait", "--port", str(port)], obj=_app([FUTURE_A, FUTURE_B]))
 
-    def mark_parked(timeout: int) -> bool:
-        parked.append(True)
-        return True
-
-    monkeypatch.setattr("annotate.cli._park", mark_parked)
-    result = CliRunner().invoke(main, ["wait"], obj=_app([FUTURE_A, FUTURE_B]))
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr
-    assert parked == []  # never parked a session it could not record
+    assert not isinstance(result.exception, OSError)  # bounced on the repo check, not the bind

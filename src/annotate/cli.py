@@ -51,7 +51,7 @@ from annotate.session import (
     read_open_time,
     write_open_time,
 )
-from annotate.session_server import wait_for_close
+from annotate.session_server import SESSION_CLOSE_PORT, wait_for_close
 from annotate.source import AnnotationSource, PostgresSource
 
 
@@ -65,9 +65,9 @@ class App:
     cfg: Config | None = None
 
 
-def _park(timeout: int) -> bool:
+def _park(timeout: int, port: int) -> bool:
     """Block on the extension-facing loopback close endpoint, or time out."""
-    return wait_for_close(timeout)
+    return wait_for_close(timeout, port)
 
 
 def _current_batch(source: AnnotationSource, group_id: str, root: pathlib.Path) -> list[Annotation]:
@@ -190,9 +190,15 @@ def pull(app: App, rel_path: str | None) -> None:
     show_default=True,
     help="Max seconds to wait for the browser's session-close request before giving up.",
 )
+@click.option(
+    "--port",
+    default=SESSION_CLOSE_PORT,
+    show_default=True,
+    help="Loopback port served for the browser's session-close request. Change it only alongside the extension, which posts to the declared port.",
+)
 @_ledger_path_option
 @click.pass_obj
-def wait(app: App, timeout: int, rel_path: str | None) -> None:
+def wait(app: App, timeout: int, port: int, rel_path: str | None) -> None:
     """Open a session, block until the browser closes it, then record and print the batch JSON.
 
     Records the open timestamp locally (no h write), serves a loopback close endpoint, then
@@ -200,7 +206,7 @@ def wait(app: App, timeout: int, rel_path: str | None) -> None:
     """
     root = _require_repo()  # bounce before opening a session whose batch we could not record
     write_open_time(root, datetime.now())
-    if not _park(timeout):
+    if not _park(timeout, port):
         raise click.ClickException(f"timed out after {timeout}s waiting for the browser session-close request")
     _deliver(_current_batch(app.source, app.group_id, root), rel_path)
 

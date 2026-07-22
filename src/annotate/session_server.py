@@ -9,6 +9,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 log = logging.getLogger(__name__)
 
+#: The loopback port the browser extension posts its session-close request to. A protocol
+#: constant shared with the extension -- one correct value, declared here so the CLI and
+#: the proof recipe name it instead of each restating the number.
+SESSION_CLOSE_PORT = 8902
+
 
 class _CloseServer(HTTPServer):
     """Loopback server whose ``closed`` flag the handler flips on a close request.
@@ -56,8 +61,13 @@ class _CloseHandler(BaseHTTPRequestHandler):
         log.info("session-close server: %s", format % args)
 
 
-def wait_for_close(timeout: float, port: int = 8902) -> bool:
-    """Serve the session-close endpoint until called or ``timeout`` expires."""
+def wait_for_close(timeout: float, port: int) -> bool:
+    """Serve the session-close endpoint until called or ``timeout`` expires.
+
+    ``port`` is supplied by the caller: the bound socket is this function's whole observable
+    effect, so a defaulted port would let a caller that meant a different one silently serve
+    the wrong endpoint and time out.
+    """
     deadline = time.monotonic() + timeout
     with _CloseServer(("127.0.0.1", port), _CloseHandler) as server:
         while not server.closed:
