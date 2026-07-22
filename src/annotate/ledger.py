@@ -49,9 +49,12 @@ def resolve(rel_path: pathlib.Path, root: pathlib.Path) -> pathlib.Path:
 
 
 def _recorded_ids(ledger_path: pathlib.Path) -> set[str]:
+    """The ids already recorded, streamed line by line (the id set itself is the dedup
+    contract and is held in memory; the file text is not)."""
     if not ledger_path.exists():
         return set()
-    return {LedgerEntry.from_json(line).id for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()}
+    with ledger_path.open(encoding="utf-8") as lines:
+        return {LedgerEntry.from_json(line).id for line in lines if line.strip()}
 
 
 def append(annotations: list[Annotation], ledger_path: pathlib.Path) -> list[LedgerEntry]:
