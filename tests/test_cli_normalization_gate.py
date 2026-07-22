@@ -105,9 +105,7 @@ def _delivered_quotes(stdout: str) -> list[str]:
 
 
 @pytest.mark.parametrize("normalized_quote", UNUSABLE, ids=UNUSABLE_IDS)
-def test_pull_refuses_to_deliver_an_annotation_with_no_usable_normalized_quote(
-    git_repo: pathlib.Path, normalized_quote: str | None
-) -> None:
+def test_pull_refuses_to_deliver_an_annotation_with_no_usable_normalized_quote(git_repo: pathlib.Path, normalized_quote: str | None) -> None:
     write_open_time(git_repo, OPEN_TIME)
 
     result = CliRunner().invoke(main, ["pull"], obj=_app([_annotation(normalized_quote, IN_SESSION)]))
@@ -118,9 +116,7 @@ def test_pull_refuses_to_deliver_an_annotation_with_no_usable_normalized_quote(
 
 
 @pytest.mark.parametrize("normalized_quote", UNUSABLE, ids=UNUSABLE_IDS)
-def test_wait_refuses_to_deliver_an_annotation_with_no_usable_normalized_quote(
-    git_repo: pathlib.Path, normalized_quote: str | None
-) -> None:
+def test_wait_refuses_to_deliver_an_annotation_with_no_usable_normalized_quote(git_repo: pathlib.Path, normalized_quote: str | None) -> None:
     port = free_port()
     statuses: list[int] = []
     closer = close_the_session(port, statuses)
@@ -139,9 +135,7 @@ def test_wait_refuses_to_deliver_an_annotation_with_no_usable_normalized_quote(
 
 
 @pytest.mark.parametrize("normalized_quote", UNUSABLE, ids=UNUSABLE_IDS)
-def test_record_refuses_to_append_an_annotation_with_no_usable_normalized_quote(
-    git_repo: pathlib.Path, normalized_quote: str | None
-) -> None:
+def test_record_refuses_to_append_an_annotation_with_no_usable_normalized_quote(git_repo: pathlib.Path, normalized_quote: str | None) -> None:
     ann = _annotation(normalized_quote, IN_SESSION)
 
     result = CliRunner().invoke(main, ["record", ann.id], obj=_app([ann]))
@@ -152,9 +146,7 @@ def test_record_refuses_to_append_an_annotation_with_no_usable_normalized_quote(
 
 
 @pytest.mark.parametrize("normalized_quote", UNUSABLE, ids=UNUSABLE_IDS)
-def test_resolve_refuses_to_write_back_an_annotation_with_no_usable_normalized_quote(
-    git_repo: pathlib.Path, normalized_quote: str | None
-) -> None:
+def test_resolve_refuses_to_write_back_an_annotation_with_no_usable_normalized_quote(git_repo: pathlib.Path, normalized_quote: str | None) -> None:
     write_open_time(git_repo, OPEN_TIME)
     client = _StubClient()
 
