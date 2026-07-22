@@ -132,6 +132,16 @@ def test_resolve_tags_each_batch_member_acted(git_repo: Path) -> None:
     assert client.tagged == [("a", ["acted"]), ("b", ["acted"])]
 
 
+def test_resolve_without_an_open_session_exits_nonzero(git_repo: Path) -> None:
+    # hypothesis-review#7: resolving with no session open must fail loudly, not tag an
+    # empty batch and report success.
+    client = _StubClient()
+    result = CliRunner().invoke(main, ["resolve"], obj=_app([A], client=client))
+    assert result.exit_code != 0
+    assert "no review session is open" in result.output
+    assert client.tagged == []
+
+
 def test_status_counts_open_annotations() -> None:
     acted = _ann("c", 5, ["acted"])
     result = CliRunner().invoke(main, ["status"], obj=_app([OPEN_M, A, B, SEND_M, acted]))

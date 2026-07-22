@@ -138,11 +138,25 @@ def test_pull_records_to_named_path(git_repo: Path) -> None:
     assert "default ledger" not in result.stderr  # a name was supplied
 
 
-def test_pull_empty_when_no_session_is_open(git_repo: Path) -> None:
+def test_pull_without_an_open_session_exits_nonzero(git_repo: Path) -> None:
+    # hypothesis-review#7: a missing session is an error, not an empty successful batch.
+    # An agent that runs `pull` before any session opened must learn that, not read `[]`
+    # as "the reviewer sent nothing".
     result = CliRunner().invoke(main, ["pull"], obj=_app([A, B]))  # no open_time parked
+    assert result.exit_code != 0
+    assert "no review session is open" in result.output
+    assert _ledger_ids(git_repo) == []  # nothing recorded for the failed delivery
+
+
+def test_pull_with_an_open_session_and_no_new_annotations_prints_an_empty_batch(
+    git_repo: Path,
+) -> None:
+    # The empty-but-successful case stays distinguishable from the missing-session error:
+    # a session IS open, nothing was created inside it, and that is a real empty delivery.
+    _write_open_time(git_repo, OPEN_TIME)
+    result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE]))
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
-    assert _ledger_ids(git_repo) == []  # nothing to record
 
 
 def test_wait_parks_open_time_then_records_and_prints_batch(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
