@@ -10,9 +10,34 @@ h write) and closes when the browser calls the loopback close endpoint.
 
 from __future__ import annotations
 
+import pathlib
 from datetime import datetime
 
 from annotate.models import Annotation
+
+#: Where a session's open timestamp is parked, inside the repo's untracked ``.git`` dir so
+#: it isolates per-repo (and per test tmp-repo) and ``pull``/``resolve`` can read it back.
+OPEN_TIME_REL = pathlib.Path(".git") / "annotate" / "open_time"
+
+
+def open_time_path(root: pathlib.Path) -> pathlib.Path:
+    return root / OPEN_TIME_REL
+
+
+def write_open_time(root: pathlib.Path, when: datetime) -> None:
+    """Record a session's open timestamp under the repo's ``.git`` dir (ISO 8601)."""
+    path = open_time_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(when.isoformat(), encoding="utf-8")
+
+
+def read_open_time(root: pathlib.Path) -> datetime | None:
+    """The parked session open timestamp, or ``None`` if no session has been opened."""
+    path = open_time_path(root)
+    if not path.exists():
+        return None
+    return datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+
 
 OPEN = "review:open"  # legacy session-marker tags, no longer emitted; filtered out of windows
 SEND = "review:send"

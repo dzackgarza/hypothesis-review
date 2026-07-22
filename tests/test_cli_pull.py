@@ -17,8 +17,9 @@ from click.testing import CliRunner
 from conftest import committed_at_head
 
 from annotate.api import HClient
-from annotate.cli import App, _write_open_time, main
+from annotate.cli import App, main
 from annotate.models import Annotation
+from annotate.session import write_open_time
 
 
 def _ann(id: str, created: datetime, tags: list[str] | None = None) -> Annotation:
@@ -78,7 +79,7 @@ def _ledger_ids(repo: Path) -> list[str]:
 
 
 def test_pull_records_and_prints_batch(git_repo: Path) -> None:
-    _write_open_time(git_repo, OPEN_TIME)
+    write_open_time(git_repo, OPEN_TIME)
     result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
     assert result.exit_code == 0, result.output
     assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]  # only the post-open ones
@@ -89,7 +90,7 @@ def test_pull_records_and_prints_batch(git_repo: Path) -> None:
 
 
 def test_pull_rejects_a_highlight_without_backend_normalization(git_repo: Path) -> None:
-    _write_open_time(git_repo, OPEN_TIME)
+    write_open_time(git_repo, OPEN_TIME)
     missing = Annotation(
         id="missing",
         created=datetime(2026, 7, 20, 12, 0, 1),
@@ -117,7 +118,7 @@ def test_pull_bounces_when_not_in_a_git_repo(tmp_path: Path, monkeypatch: pytest
 
 
 def test_pull_dedups_on_a_second_call(git_repo: Path) -> None:
-    _write_open_time(git_repo, OPEN_TIME)
+    write_open_time(git_repo, OPEN_TIME)
     runner = CliRunner()
     runner.invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
     head_after_first = committed_at_head(git_repo)
@@ -130,7 +131,7 @@ def test_pull_dedups_on_a_second_call(git_repo: Path) -> None:
 
 
 def test_pull_records_to_named_path(git_repo: Path) -> None:
-    _write_open_time(git_repo, OPEN_TIME)
+    write_open_time(git_repo, OPEN_TIME)
     result = CliRunner().invoke(main, ["pull", "--path", "research-intake.jsonl"], obj=_app([A, B]))
     assert result.exit_code == 0, result.output
     assert (git_repo / "research-intake.jsonl").exists()
@@ -153,7 +154,7 @@ def test_pull_with_an_open_session_and_no_new_annotations_prints_an_empty_batch(
 ) -> None:
     # The empty-but-successful case stays distinguishable from the missing-session error:
     # a session IS open, nothing was created inside it, and that is a real empty delivery.
-    _write_open_time(git_repo, OPEN_TIME)
+    write_open_time(git_repo, OPEN_TIME)
     result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE]))
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []

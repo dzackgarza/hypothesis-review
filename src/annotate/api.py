@@ -43,10 +43,7 @@ class HClient:
         current.raise_for_status()
         existing = current.json().get("tags")
         if not isinstance(existing, list) or not all(isinstance(t, str) for t in existing):
-            msg = (
-                f"annotation {annotation_id}: response `tags` is {existing!r}, not a list "
-                "of strings; refusing to PATCH a merge built from a malformed response"
-            )
+            msg = f"annotation {annotation_id}: response `tags` is {existing!r}, not a list of strings; refusing to PATCH a merge built from a malformed response"
             raise ResponseContractError(msg)
         merged = list(dict.fromkeys([*existing, *add]))
         resp = self._client.patch(f"/api/annotations/{annotation_id}", json={"tags": merged})

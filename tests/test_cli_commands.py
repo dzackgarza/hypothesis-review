@@ -17,6 +17,7 @@ from annotate.api import HClient
 from annotate.cli import App, main
 from annotate.config import Config
 from annotate.models import Annotation
+from annotate.session import write_open_time
 
 
 def _ann(id: str, created: Any, tags: list[str] | None = None) -> Annotation:
@@ -121,9 +122,7 @@ def test_record_bounces_outside_a_git_repo(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_resolve_tags_each_batch_member_acted(git_repo: Path) -> None:
-    from annotate.cli import _write_open_time
-
-    _write_open_time(git_repo, datetime(2026, 7, 20, 12, 0, 0))
+    write_open_time(git_repo, datetime(2026, 7, 20, 12, 0, 0))
     ra = _ann("a", datetime(2026, 7, 20, 12, 0, 1))
     rb = _ann("b", datetime(2026, 7, 20, 12, 0, 2))
     client = _StubClient()
@@ -197,9 +196,7 @@ def test_doctor_reports_git_repo_and_where_feedback_lands(git_repo: Path) -> Non
     assert "[OK] config" in result.stdout
 
 
-def test_status_root_larger_than_the_read_bound_exits_nonzero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_status_root_larger_than_the_read_bound_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Drift detection reads the whole tree into memory; past the declared bound that
     # must be a loud error, not an unbounded memory balloon.
     monkeypatch.setattr("annotate.cli._BUILD_TEXT_MAX_BYTES", 8)

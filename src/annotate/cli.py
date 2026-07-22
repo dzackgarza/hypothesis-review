@@ -41,13 +41,16 @@ from annotate.ledger import (
     track as ledger_track,
 )
 from annotate.models import Annotation, LedgerEntry
-from annotate.session import ACTED, OPEN, SEND, batch_since
+from annotate.session import (
+    ACTED,
+    OPEN,
+    SEND,
+    batch_since,
+    read_open_time,
+    write_open_time,
+)
 from annotate.session_server import wait_for_close
 from annotate.source import AnnotationSource, PostgresSource
-
-#: Where a session's open timestamp is parked, inside the repo's untracked ``.git`` dir so it
-#: isolates per-repo (and per test tmp-repo) and ``pull``/``resolve`` can read it back.
-OPEN_TIME_REL = pathlib.Path(".git") / "annotate" / "open_time"
 
 
 @dataclasses.dataclass
@@ -58,25 +61,6 @@ class App:
     client: HClient
     group_id: str
     cfg: Config | None = None
-
-
-def _open_time_path(root: pathlib.Path) -> pathlib.Path:
-    return root / OPEN_TIME_REL
-
-
-def _write_open_time(root: pathlib.Path, when: datetime) -> None:
-    """Record a session's open timestamp under the repo's ``.git`` dir (ISO 8601)."""
-    path = _open_time_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(when.isoformat(), encoding="utf-8")
-
-
-def _read_open_time(root: pathlib.Path) -> datetime | None:
-    """The parked session open timestamp, or ``None`` if no session has been opened."""
-    path = _open_time_path(root)
-    if not path.exists():
-        return None
-    return datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
 
 
 def _park(timeout: int) -> bool:
@@ -91,12 +75,9 @@ def _current_batch(source: AnnotationSource, group_id: str, root: pathlib.Path) 
     an empty delivery -- returning ``[]`` would let ``pull``/``resolve`` report success for
     a review window that never existed (hypothesis-review#7).
     """
-    since = _read_open_time(root)
+    since = read_open_time(root)
     if since is None:
-        raise click.ClickException(
-            "no review session is open in this repository -- run `annotate wait` "
-            "(or open a session from the browser) before pulling or resolving"
-        )
+        raise click.ClickException("no review session is open in this repository -- run `annotate wait` (or open a session from the browser) before pulling or resolving")
     return batch_since(source.list(group_id), since)
 
 
@@ -146,13 +127,18 @@ def _record(anns: list[Annotation], rel_path: str | None) -> list[LedgerEntry]:
     return new
 
 
-def _deliver(anns: list[Annotation], rel_path: str | None) -> None:
-    """Record the delivered annotations, then print the batch to stdout. Recording runs
-    first, so feedback can never reach the agent unrecorded."""
+def _require_normalized(anns: list[Annotation], action: str) -> None:
+    """Refuse to hand unnormalized quotes onward -- the fork's fail-loud contract."""
     missing = [ann for ann in anns if ann.normalization_error is not None]
     if missing:
         details = "; ".join(f"{ann.id}: {ann.normalization_error}" for ann in missing)
-        raise click.ClickException(f"cannot deliver unnormalized annotation(s): {details}")
+        raise click.ClickException(f"cannot {action} unnormalized annotation(s): {details}")
+
+
+def _deliver(anns: list[Annotation], rel_path: str | None) -> None:
+    """Record the delivered annotations, then print the batch to stdout. Recording runs
+    first, so feedback can never reach the agent unrecorded."""
+    _require_normalized(anns, "deliver")
     _record(anns, rel_path)
     click.echo(_anns_json(anns))
 
@@ -208,7 +194,7 @@ def wait(app: App, timeout: int, rel_path: str | None) -> None:
     delivers the real annotations created during the window when the extension calls it.
     """
     root = _require_repo()  # bounce before opening a session whose batch we could not record
-    _write_open_time(root, datetime.now())
+    write_open_time(root, datetime.now())
     if not _park(timeout):
         raise click.ClickException(f"timed out after {timeout}s waiting for the browser session-close request")
     _deliver(_current_batch(app.source, app.group_id, root), rel_path)
@@ -293,10 +279,7 @@ def record(app: App, rel_path: str | None, annotation_ids: tuple[str, ...]) -> N
     if missing:
         raise click.ClickException(f"annotation id(s) not in the group: {', '.join(missing)}")
     selected = [by_id[i] for i in annotation_ids]
-    missing_normalization = [ann for ann in selected if ann.normalization_error is not None]
-    if missing_normalization:
-        details = "; ".join(f"{ann.id}: {ann.normalization_error}" for ann in missing_normalization)
-        raise click.ClickException(f"cannot record unnormalized annotation(s): {details}")
+    _require_normalized(selected, "record")
     new = _record(selected, rel_path)
     click.echo(json.dumps([dataclasses.asdict(e) for e in new], default=str))
 
@@ -344,9 +327,7 @@ def _build_text(root: pathlib.Path) -> str:
         total += p.stat().st_size
         if total > _BUILD_TEXT_MAX_BYTES:
             raise click.ClickException(
-                f"--root tree exceeds {_BUILD_TEXT_MAX_BYTES // (1024 * 1024)}MB; "
-                "drift detection reads the whole tree into memory and needs a "
-                "smaller build root"
+                f"--root tree exceeds {_BUILD_TEXT_MAX_BYTES // (1024 * 1024)}MB; drift detection reads the whole tree into memory and needs a smaller build root"
             )
         parts.append(p.read_text(encoding="utf-8", errors="ignore"))
     return "\n".join(parts)
