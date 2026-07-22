@@ -11,6 +11,15 @@ from types import TracebackType
 import httpx
 
 
+class ResponseContractError(RuntimeError):
+    """The h API returned a response that violates its own contract.
+
+    Raised instead of coercing missing or malformed required fields into defaults: a
+    PATCH built from coerced state would silently destroy server data
+    (hypothesis-review#7).
+    """
+
+
 class HClient:
     def __init__(
         self,
