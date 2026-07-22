@@ -170,6 +170,63 @@ def test_status_root_flags_drifted_quote(tmp_path: Path) -> None:
     assert "drift\tgone" in result.stdout
 
 
+def _drift_verdicts(stdout: str) -> dict[str, str]:
+    """The per-annotation verdicts ``status --root`` printed, keyed by annotation id."""
+    return {parts[1]: parts[0] for line in stdout.splitlines() if len(parts := line.split("\t")) == 3}
+
+
+def test_status_root_refuses_bytes_it_cannot_decode_rather_than_deriving_a_verdict_from_them(tmp_path: Path) -> None:
+    # 0xff is not valid UTF-8 in any position. A decoder told to drop what it cannot decode
+    # splices the bytes on either side of it into exactly the quoted text, so this tree gets
+    # reported as still containing a quote that it does not contain: drift called absent
+    # precisely where the command has the least information about the tree. Deriving no
+    # verdict at all is the only honest outcome, and the refusal has to name the file whose
+    # bytes stopped it or the operator cannot act on it.
+    build = tmp_path / "site"
+    build.mkdir()
+    (build / "asset.bin").write_bytes(b"vanished\xfftext")
+    spliced = Annotation(
+        id="spliced",
+        created=6,
+        userid="acct:me@localhost",
+        group="grp",
+        uri="http://localhost/spliced.html",
+        text="note spliced",
+        tags=[],
+        target=[{"selector": [{"type": "TextQuoteSelector", "exact": "vanishedtext"}]}],
+    )
+
+    result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([spliced]))
+
+    assert result.exit_code != 0
+    assert _drift_verdicts(result.stdout) == {}
+    assert "asset.bin" in result.output
+
+
+def test_status_root_still_derives_verdicts_from_a_decodable_tree(tmp_path: Path) -> None:
+    # The counterpart to the refusal above: refusing undecodable bytes must not be bought by
+    # refusing text trees, so the same tree with the byte replaced still yields both verdicts.
+    build = tmp_path / "site"
+    build.mkdir()
+    (build / "asset.bin").write_bytes("vanished text".encode())
+    (build / "a.html").write_text("... the exact quote a is still here ...")
+    spliced = Annotation(
+        id="spliced",
+        created=6,
+        userid="acct:me@localhost",
+        group="grp",
+        uri="http://localhost/spliced.html",
+        text="note spliced",
+        tags=[],
+        target=[{"selector": [{"type": "TextQuoteSelector", "exact": "vanishedtext"}]}],
+    )
+
+    result = CliRunner().invoke(main, ["status", "--root", str(build)], obj=_app([A, spliced]))
+
+    assert result.exit_code == 0, result.output
+    assert _drift_verdicts(result.stdout) == {"a": "match", "spliced": "drift"}
+
+
 def test_doctor_fails_and_explains_outside_a_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(main, ["doctor"], obj=_app([]))

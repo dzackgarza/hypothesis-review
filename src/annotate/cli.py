@@ -324,8 +324,33 @@ def _exact_quotes(target: Any) -> list[str]:
 _BUILD_TEXT_MAX_BYTES = 50 * 1024 * 1024
 
 
+def _file_text(path: pathlib.Path) -> str:
+    """The file's UTF-8 text, or a loud refusal naming it.
+
+    The one place drift detection turns bytes into text, so it is the one place the answer
+    could be silently falsified. A decoder asked to drop what it cannot decode deletes the
+    offending bytes and splices their neighbours together, which both hides content the
+    comparison should have seen and can manufacture text the tree does not contain -- and it
+    does so without any signal, exactly where the command knows least about the tree. So the
+    bytes are decoded strictly and a file that is not UTF-8 text stops the command with its
+    path; nothing is skipped, replaced, or carried past. This is the sanctioned rendering of
+    a structured decode failure into the CLI's error protocol: it terminates, and it neither
+    defaults nor returns a partial answer.
+    """
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise click.ClickException(
+            f"{path}: byte {exc.start} is not valid UTF-8 ({exc.reason}). Drift detection compares every file under --root as text and will not derive a match/drift verdict from bytes it cannot decode. Point --root at the build's text output, or remove the non-text file."
+        ) from exc
+
+
 def _build_text(root: pathlib.Path) -> str:
     """Concatenated text of every file under ``root`` (the current build).
+
+    Every regular file participates in the comparison -- that is the rule, not a consequence
+    of which files happened to decode (see :func:`_file_text`).
 
     Bounded: the whole tree is read into memory for substring matching, so a tree
     larger than ``_BUILD_TEXT_MAX_BYTES`` is a loud error rather than a silent
@@ -341,7 +366,7 @@ def _build_text(root: pathlib.Path) -> str:
             raise click.ClickException(
                 f"--root tree exceeds {_BUILD_TEXT_MAX_BYTES // (1024 * 1024)}MB; drift detection reads the whole tree into memory and needs a smaller build root"
             )
-        parts.append(p.read_text(encoding="utf-8", errors="ignore"))
+        parts.append(_file_text(p))
     return "\n".join(parts)
 
 
