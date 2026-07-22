@@ -5,10 +5,33 @@ so they work against a plain throwaway repo; ``git_repo`` also chdirs into it, s
 commands resolve the repo from the current working directory.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
+
+#: Live-boundary opt-in flags, as declared next to the markers in pyproject.toml. The
+#: pg/e2e tests drive the real self-hosted h stack (Postgres + API); a runner without
+#: that stack cannot execute them, so they are collected only when their flag is set.
+#: This is explicit collection-time deselection with a visible count -- never a skip
+#: that reports the burden as exercised. The burden is discharged on the machine that
+#: runs the stack via the integrated proof workflow.
+_OPT_IN_FLAGS = {"pg": "ANNOTATE_PG_IT", "e2e": "ANNOTATE_E2E"}
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    disabled = {marker: flag for marker, flag in _OPT_IN_FLAGS.items() if os.environ.get(flag) != "1"}
+    if not disabled:
+        return
+    kept: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        gated = [m for m in disabled if item.get_closest_marker(m)]
+        (deselected if gated else kept).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = kept
 
 
 def _git(repo: Path, *args: str) -> None:
