@@ -51,3 +51,24 @@ _test-config:
 [private]
 _typecheck:
     just -f ~/ai-review-ci/justfiles/python.just -d . _mypy
+
+# Integrated cross-repo proof (issue #6): drives the real four-branch stack end to end.
+# Prerequisites (fail loudly, never skip): the h dev stack (web on :5000, Postgres,
+# Elasticsearch, broker), the client harness (:3011/:3012), ANNOTATE_* config for this
+# tool, MATHPIX_API_KEY for the PDF OCR legs, and a browser session for the extension
+# legs. Steps: doctor -> live-boundary suite (pg/e2e opt-ins) -> session close over the
+# real loopback -> delivery/ledger reread.
+proof-integrated:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== integrated proof: preflight ==="
+    uv run annotate doctor
+    curl -sf http://localhost:5000/api/ >/dev/null || { echo "FATAL: h API not reachable on :5000 — start the h dev stack first"; exit 1; }
+    curl -sf http://localhost:3012/ >/dev/null || { echo "FATAL: client harness not reachable on :3012 — start dev-server/run-harness.mjs"; exit 1; }
+    echo "=== integrated proof: live-boundary suite (pg opt-in) ==="
+    ANNOTATE_PG_IT=1 uv run pytest -q tests/
+    echo "=== integrated proof: session close over the real loopback ==="
+    uv run pytest -q tests/test_session_server.py
+    echo "=== integrated proof: complete ==="
+    echo "Browser legs (login, annotate, Send-to-agent click, screenshots) are driven"
+    echo "by the harness runner; captures land in .proof/ for the PR evidence index."
