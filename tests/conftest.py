@@ -5,7 +5,6 @@ so they work against a plain throwaway repo; ``git_repo`` also chdirs into it, s
 commands resolve the repo from the current working directory.
 """
 
-import os
 import socket
 import subprocess
 import threading
@@ -16,29 +15,57 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 
-#: Live-boundary opt-in flags, as declared next to the markers in pyproject.toml. The
-#: pg/e2e tests drive the real self-hosted h stack (Postgres + API); a runner without
-#: that stack cannot execute them, so they are collected only when their flag is set.
-#: This is explicit collection-time deselection with a visible count -- never a skip
-#: that reports the burden as exercised. The burden is discharged on the machine that
-#: runs the stack via the integrated proof workflow.
-_OPT_IN_FLAGS = {"pg": "ANNOTATE_PG_IT", "e2e": "ANNOTATE_E2E"}
+from annotate.config import Config
+
+#: The live-boundary tests drive the real self-hosted stack: h's API and its Postgres.
+#: That stack is not an optional extra -- delivering a batch of feedback to an agent is
+#: what this tool does, and it cannot be proved against anything else. So these tests are
+#: always collected, and a stack that is not there fails the run rather than quietly
+#: reducing what was proved (hypothesis-review#17).
+_LIVE_MARKERS = ("pg", "e2e")
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    disabled = {marker: flag for marker, flag in _OPT_IN_FLAGS.items() if os.environ.get(flag) != "1"}
-    if not disabled:
-        return
-    kept: list[pytest.Item] = []
-    deselected: list[pytest.Item] = []
+def _unreachable() -> str | None:
+    """Why the live stack cannot be used, or None if it can.
+
+    Reported the way `annotate doctor` reports it, because the two answers need different
+    responses: a stack that is not running gets started, a stack that is running and broken
+    gets debugged. This is the one place that translates a transport failure into that
+    sentence -- it ends the run, it does not continue with less.
+    """
+    cfg = Config.load()
+    try:
+        response = httpx.get(f"{cfg.api_url}/api/", timeout=5)
+    except httpx.HTTPError as exc:
+        return f"nothing is serving h at {cfg.api_url} ({exc.__class__.__name__})"
+    if response.status_code != httpx.codes.OK:
+        return f"h at {cfg.api_url} is serving but answered HTTP {response.status_code}"
+    try:
+        with psycopg.connect(cfg.pg_dsn, connect_timeout=5) as connection:
+            connection.execute("SELECT 1")
+    except psycopg.OperationalError as exc:
+        return f"h's Postgres is not usable ({str(exc).strip().splitlines()[0]})"
+    return None
+
+
+@pytest.fixture(scope="session")
+def live_stack() -> None:
+    """Fail the run, once, when the stack the live-boundary tests need is not usable."""
+    reason = _unreachable()
+    if reason is not None:
+        pytest.fail(f"the live h stack is required and unusable: {reason}", pytrace=False)
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Give every live-boundary test the fixture that proves its stack is there."""
     for item in items:
-        gated = [m for m in disabled if item.get_closest_marker(m)]
-        (deselected if gated else kept).append(item)
-    if deselected:
-        config.hook.pytest_deselected(items=deselected)
-        items[:] = kept
+        if any(item.get_closest_marker(marker) for marker in _LIVE_MARKERS):
+            # Only function items carry fixtures; `fixturenames` is not on the base Item.
+            if isinstance(item, pytest.Function):
+                item.fixturenames.append("live_stack")
 
 
 def _git(repo: Path, *args: str) -> None:
