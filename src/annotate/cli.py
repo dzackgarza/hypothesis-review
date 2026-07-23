@@ -76,9 +76,14 @@ def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
-def _park(timeout: int, port: int) -> bool:
-    """Block on the extension-facing loopback close endpoint, or time out."""
-    return wait_for_close(timeout, port)
+def _park(timeout: int, port: int, count_queued: Callable[[], int]) -> bool:
+    """Block on the extension-facing loopback endpoints, or time out.
+
+    ``count_queued`` answers the browser's status poll. It is evaluated per request, so
+    the indicator in the toolbar tracks notes as they land rather than reporting the
+    count at the moment the session opened.
+    """
+    return wait_for_close(timeout, port, count_queued)
 
 
 def _current_batch(source: AnnotationSource, group_id: str, root: pathlib.Path) -> list[Annotation]:
@@ -217,7 +222,7 @@ def wait(app: App, timeout: int, port: int, rel_path: str | None) -> None:
     """
     root = _require_repo()  # bounce before opening a session whose batch we could not record
     write_open_time(root, _now())
-    if not _park(timeout, port):
+    if not _park(timeout, port, lambda: len(_current_batch(app.source, app.group_id, root))):
         raise click.ClickException(f"timed out after {timeout}s waiting for the browser session-close request")
     _deliver(_current_batch(app.source, app.group_id, root), rel_path)
 
