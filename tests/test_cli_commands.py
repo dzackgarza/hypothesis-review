@@ -58,7 +58,11 @@ class _StubClient(HClient):
     """Records ``acted`` tag writes without opening an httpx client."""
 
     def __init__(self) -> None:
+        self.deleted: list[str] = []
         self.tagged: list[tuple[str, list[str]]] = []
+
+    def delete(self, annotation_id: str) -> None:
+        self.deleted.append(annotation_id)
 
     def tag(self, annotation_id: str, add: list[str]) -> None:
         self.tagged.append((annotation_id, list(add)))

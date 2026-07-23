@@ -59,10 +59,14 @@ class _StubSource:
 
 
 class _StubClient(HClient):
-    """A do-nothing client: pull/wait never write to h."""
+    """Records what the CLI asked h to do, so a test can assert the drain and its order."""
 
     def __init__(self) -> None:
+        self.deleted: list[str] = []
         self.tagged: list[tuple[str, list[str]]] = []
+
+    def delete(self, annotation_id: str) -> None:
+        self.deleted.append(annotation_id)
 
     def tag(self, annotation_id: str, add: list[str]) -> None:
         self.tagged.append((annotation_id, list(add)))
@@ -188,8 +192,11 @@ def test_wait_delivers_the_batch_when_the_browser_closes_the_session(git_repo: P
     assert statuses == [204]  # the served endpoint answered the browser's close request
     assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]
     assert (git_repo / ".git" / "annotate" / "open_time").exists()  # open time parked locally
-    assert client.tagged == []  # wait makes no h write
+    assert client.tagged == []  # wait tags nothing
     assert _ledger_ids(git_repo) == ["a", "b"]  # batch recorded
+    # ...and drained: the point of the mechanism is that delivered feedback leaves the
+    # reader's sidebar rather than accumulating in it forever.
+    assert client.deleted == ["a", "b"]
 
 
 def test_wait_times_out_when_the_session_is_never_closed(git_repo: Path) -> None:
@@ -219,3 +226,33 @@ def test_wait_bounces_before_parking_outside_a_repo(tmp_path: Path, monkeypatch:
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr
     assert not isinstance(result.exception, OSError)  # bounced on the repo check, not the bind
+
+
+def test_a_failed_record_drains_nothing(git_repo: Path) -> None:
+    """The case that would lose a reader's note for good.
+
+    Once an annotation is deleted from h, the ledger holds the only copy of its quote,
+    its selectors and its recovered LaTeX. So the write has to come first, and a write
+    that fails must leave every note where the reader can still see it.
+    """
+    port = free_port()
+    statuses: list[int] = []
+    closer = close_the_session(port, statuses)
+    client = _StubClient()
+    # The ledger cannot be written: its parent path is a file, not a directory.
+    ledger_parent = git_repo / "feedback"
+    if ledger_parent.exists():
+        for child in ledger_parent.iterdir():
+            child.unlink()
+        ledger_parent.rmdir()
+    ledger_parent.write_text("not a directory")
+
+    result = CliRunner().invoke(
+        main,
+        ["wait", "--timeout", "20", "--port", str(port)],
+        obj=_app([PAST, FUTURE_A], client=client),
+    )
+    closer.join(timeout=5)
+
+    assert result.exit_code != 0
+    assert client.deleted == []

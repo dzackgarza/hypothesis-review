@@ -153,11 +153,18 @@ def _require_normalized(anns: list[Annotation], action: str) -> None:
         raise click.ClickException(f"cannot {action} unnormalized annotation(s): {details}")
 
 
-def _deliver(anns: list[Annotation], rel_path: str | None) -> None:
-    """Record the delivered annotations, then print the batch to stdout. Recording runs
-    first, so feedback can never reach the agent unrecorded."""
+def _deliver(anns: list[Annotation], rel_path: str | None, client: HClient | None = None) -> None:
+    """Record the delivered annotations, drain them from h, then print the batch.
+
+    The order is the whole safety argument. Recording runs first, so feedback can never
+    reach the agent unrecorded; draining runs only after that write returns, so a failed
+    record leaves every note in the reader's sidebar rather than deleting the only copy.
+    """
     _require_normalized(anns, "deliver")
     _record(anns, rel_path)
+    if client is not None:
+        for ann in anns:
+            client.delete(ann.id)
     click.echo(_anns_json(anns))
 
 
@@ -224,7 +231,7 @@ def wait(app: App, timeout: int, port: int, rel_path: str | None) -> None:
     write_open_time(root, _now())
     if not _park(timeout, port, lambda: len(_current_batch(app.source, app.group_id, root))):
         raise click.ClickException(f"timed out after {timeout}s waiting for the browser session-close request")
-    _deliver(_current_batch(app.source, app.group_id, root), rel_path)
+    _deliver(_current_batch(app.source, app.group_id, root), rel_path, app.client)
 
 
 def _not_marker(ann: Annotation) -> bool:
