@@ -75,6 +75,6 @@ It does not create a marker annotation or write session state to Hypothesis.
 
 ## Failure boundaries
 
-`annotate wait` times out with an error if the extension does not close the session.
+`annotate wait` blocks until the extension closes the session -- annotation is unbounded human work, and the agent that launched the process owns when to stop it (interrupt or kill). Passing `--timeout SECONDS` opts into a bounded wait that instead fails with an error on expiry, for automation where an unclosed session should not hang.
 The extension distinguishes a rejected HTTP response from failure to contact the loopback service and keeps that description visible for retry.
 Normalization failures retain their specific backend description through storage and CLI delivery rather than collapsing into a generic failure.

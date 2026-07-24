@@ -199,6 +199,29 @@ def test_wait_delivers_the_batch_when_the_browser_closes_the_session(git_repo: P
     assert client.deleted == ["a", "b"]
 
 
+def test_wait_without_a_timeout_still_serves_and_delivers_on_close(git_repo: Path) -> None:
+    # The default is an unbounded wait (no --timeout): annotation is human work with no fixed
+    # length. This proves the deadline-less path still parks, serves the close endpoint, and
+    # delivers on the real POST -- it would fail on a `wait_for_close(None, ...)` that never
+    # served or never returned. The close arrives promptly, so the wait does not hang here.
+    port = free_port()
+    statuses: list[int] = []
+    closer = close_the_session(port, statuses)
+    client = _StubClient()
+
+    result = CliRunner().invoke(
+        main,
+        ["wait", "--port", str(port)],  # no --timeout: block until closed
+        obj=_app([PAST, FUTURE_A, FUTURE_B], client=client),
+    )
+    closer.join(timeout=5)
+
+    assert result.exit_code == 0, result.output
+    assert statuses == [204]  # the served endpoint answered the browser's close request
+    assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]
+    assert client.deleted == ["a", "b"]  # delivered and drained, same as the bounded path
+
+
 def test_wait_times_out_when_the_session_is_never_closed(git_repo: Path) -> None:
     # Nobody posts to the served endpoint: the command runs the real timeout to expiry and
     # must deliver nothing, since an unclosed session never defined a review window.

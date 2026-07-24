@@ -90,21 +90,30 @@ class _CloseHandler(BaseHTTPRequestHandler):
         log.info("session-close server: %s", format % args)
 
 
-def wait_for_close(timeout: float, port: int, count_queued: Callable[[], int]) -> bool:
-    """Serve the session endpoints until closed or ``timeout`` expires.
+def wait_for_close(timeout: float | None, port: int, count_queued: Callable[[], int]) -> bool:
+    """Serve the session endpoints until closed, or until ``timeout`` expires.
+
+    ``timeout`` is optional: ``None`` blocks indefinitely -- annotation has no fixed length,
+    and the caller owns when to stop (a SIGINT/SIGTERM breaks the 0.1s poll loop, so the wait
+    is interruptible without a deadline). A finite value bounds the wait and returns ``False``
+    on expiry.
 
     ``port`` is supplied by the caller: the bound socket is this function's whole observable
     effect, so a defaulted port would let a caller that meant a different one silently serve
     the wrong endpoint and time out. ``count_queued`` likewise: the status endpoint reports
     what this session would deliver, and only the caller knows how to count that.
     """
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout is None else time.monotonic() + timeout
     with _CloseServer(("127.0.0.1", port), _CloseHandler) as server:
         server.count_queued = count_queued
         while not server.closed:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            server.timeout = min(remaining, 0.1)
+            if deadline is None:
+                # No bound: poll at the same cadence so a signal still breaks the loop.
+                server.timeout = 0.1
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                server.timeout = min(remaining, 0.1)
             server.handle_request()
     return True

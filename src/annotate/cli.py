@@ -76,12 +76,13 @@ def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
-def _park(timeout: int, port: int, count_queued: Callable[[], int]) -> bool:
-    """Block on the extension-facing loopback endpoints, or time out.
+def _park(timeout: int | None, port: int, count_queued: Callable[[], int]) -> bool:
+    """Block on the extension-facing loopback endpoints until closed, or time out.
 
-    ``count_queued`` answers the browser's status poll. It is evaluated per request, so
-    the indicator in the toolbar tracks notes as they land rather than reporting the
-    count at the moment the session opened.
+    ``timeout`` is optional: ``None`` blocks until the browser closes the session (the
+    default -- see ``wait``). ``count_queued`` answers the browser's status poll. It is
+    evaluated per request, so the indicator in the toolbar tracks notes as they land rather
+    than reporting the count at the moment the session opened.
     """
     return wait_for_close(timeout, port, count_queued)
 
@@ -209,9 +210,14 @@ def pull(app: App, rel_path: str | None) -> None:
 @main.command()
 @click.option(
     "--timeout",
-    default=300,
-    show_default=True,
-    help="Max seconds to wait for the browser's session-close request before giving up.",
+    type=int,
+    default=None,
+    help=(
+        "Optional seconds to wait for the browser's session-close request before giving "
+        "up. Omitted by default: `wait` blocks until the browser closes the session, so "
+        "the reader takes as long as they need. The agent running this owns the process "
+        "and stops it by interrupting or killing it; set a bound only for automation."
+    ),
 )
 @click.option(
     "--port",
@@ -221,11 +227,16 @@ def pull(app: App, rel_path: str | None) -> None:
 )
 @_ledger_path_option
 @click.pass_obj
-def wait(app: App, timeout: int, port: int, rel_path: str | None) -> None:
+def wait(app: App, timeout: int | None, port: int, rel_path: str | None) -> None:
     """Open a session, block until the browser closes it, then record and print the batch JSON.
 
     Records the open timestamp locally (no h write), serves a loopback close endpoint, then
     delivers the real annotations created during the window when the extension calls it.
+
+    The wait is unbounded by default: annotation is human work with no fixed length, and the
+    agent that launched this owns the process -- it stops the wait by interrupting or killing
+    it (the poll loop breaks on the signal promptly). ``--timeout`` sets an optional bound for
+    automation, where an unclosed session should fail rather than hang.
     """
     root = _require_repo()  # bounce before opening a session whose batch we could not record
     write_open_time(root, _now())
