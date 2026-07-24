@@ -5,12 +5,17 @@ so they work against a plain throwaway repo; ``git_repo`` also chdirs into it, s
 commands resolve the repo from the current working directory.
 """
 
+import functools
 import socket
 import subprocess
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import (
+    BaseHTTPRequestHandler,
+    SimpleHTTPRequestHandler,
+    ThreadingHTTPServer,
+)
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +139,38 @@ def http_service(status: int) -> Iterator[str]:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+class _QuietFileHandler(SimpleHTTPRequestHandler):
+    """SimpleHTTPRequestHandler with its request logging silenced.
+
+    The stdlib handler already implements file serving (its ``do_GET`` is library code); this
+    only quiets the per-request stderr noise so it does not interleave with test output.
+    """
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+
+@pytest.fixture(scope="session")
+def framework_page() -> Iterator[str]:
+    """Serve the frameworkmath render-test page on loopback for the whole test session.
+
+    The live-boundary seeds create HTML annotations whose URI h fetches server-side (at
+    intake) to recover the authored TeX from the page's ``<span class="math">`` markup. That
+    page is a fixture these tests own, not a service under test -- so the test stands it up
+    itself rather than assuming an externally-run harness is listening on a fixed port. h
+    resolves the loopback URL because it runs on the same host. Yields the page's URL.
+    """
+    fixtures = Path(__file__).parent / "fixtures"
+    handler = functools.partial(_QuietFileHandler, directory=str(fixtures))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}/frameworkmath.html"
     server.shutdown()
     server.server_close()
     thread.join(timeout=5)

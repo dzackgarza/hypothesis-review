@@ -29,24 +29,24 @@ from annotate.config import Config
 
 # A recoverable selection on the frameworkmath page: the flattened MathJax capture of the
 # inline math span, which h's Node/KaTeX extractor maps back to authored LaTeX at intake.
-FRAMEWORK_URL = "http://localhost:3012/document/frameworkmath"
 RECOVERABLE_EXACT = "and ιB:C.B→C their intersection"
 
 
-def _seed(cfg: Config, tags: list[str]) -> str:
+def _seed(cfg: Config, tags: list[str], page_url: str) -> str:
     """Create an annotation via the live API; return its h public id. Carries a recoverable
-    math quote so the synchronous intake normalization accepts it (200)."""
+    math quote (on ``page_url``, the test-served fixture page) so the synchronous intake
+    normalization accepts it (200)."""
     resp = httpx.post(
         f"{cfg.api_url}/api/annotations",
         headers={"Authorization": f"Bearer {cfg.token}"},
         json={
-            "uri": FRAMEWORK_URL,
+            "uri": page_url,
             "text": "note",
             "tags": tags,
             "group": cfg.group_id,
             "target": [
                 {
-                    "source": FRAMEWORK_URL,
+                    "source": page_url,
                     "selector": [{"type": "TextQuoteSelector", "exact": RECOVERABLE_EXACT}],
                 }
             ],
@@ -68,11 +68,12 @@ def _rows_for_tag(dsn: str, tag: str) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def run() -> Iterator[tuple[Config, str]]:
-    """A per-run unique tag every created annotation carries, hard-deleted after."""
+def run(framework_page: str) -> Iterator[tuple[Config, str, str]]:
+    """A per-run unique tag every created annotation carries, hard-deleted after; plus the
+    URL of the test-served fixture page the seeds annotate."""
     cfg = Config.load()
     tag = f"__it_{uuid.uuid4().hex}"
-    yield cfg, tag
+    yield cfg, tag, framework_page
     with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM annotation WHERE tags @> ARRAY[%s]::text[]", (tag,))
         conn.commit()
@@ -80,8 +81,8 @@ def run() -> Iterator[tuple[Config, str]]:
 
 @pytest.mark.pg
 def test_tag_adds_new_tag_and_merges_existing_without_duplicating(run: Any) -> None:
-    cfg, tag = run
-    api_id = _seed(cfg, [tag, "paperA"])  # annotation already carries paperA
+    cfg, tag, page_url = run
+    api_id = _seed(cfg, [tag, "paperA"], page_url)  # annotation already carries paperA
 
     HClient(cfg.api_url, cfg.token).tag(api_id, ["acted", "paperA"])
 

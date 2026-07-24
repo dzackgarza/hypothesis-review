@@ -39,7 +39,6 @@ from annotate.source import PostgresSource
 #: create through Mathpix OCR, so seeding a PDF highlight needs a real math PDF + a key.
 PDF_ROW_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "pdf_annotation_row.json"
 
-FRAMEWORK_URL = "http://localhost:3012/document/frameworkmath"
 # Two distinct recoverable selections on the frameworkmath page (flattened MathJax captures
 # that h's Node/KaTeX extractor maps back to authored LaTeX at intake).
 EXACT_1 = "and ιB:C.B→C their intersection"
@@ -51,11 +50,13 @@ def _seed(
     text: str,
     tags: list[str],
     exact: str,
+    page_url: str,
     prefix: str | None = None,
     suffix: str | None = None,
 ) -> str:
     """Create one annotation via the real h API (as the extension does) with a recoverable
-    math quote; return the h public (API) id the server assigned."""
+    math quote on ``page_url`` (the test-served fixture page); return the h public (API) id
+    the server assigned."""
     selector: dict[str, Any] = {"type": "TextQuoteSelector", "exact": exact}
     if prefix is not None:
         selector["prefix"] = prefix
@@ -65,11 +66,11 @@ def _seed(
         f"{cfg.api_url}/api/annotations",
         headers={"Authorization": f"Bearer {cfg.token}"},
         json={
-            "uri": FRAMEWORK_URL,
+            "uri": page_url,
             "text": text,
             "tags": tags,
             "group": cfg.group_id,
-            "target": [{"source": FRAMEWORK_URL, "selector": [selector]}],
+            "target": [{"source": page_url, "selector": [selector]}],
         },
     )
     resp.raise_for_status()
@@ -79,15 +80,15 @@ def _seed(
 
 
 @pytest.fixture
-def seeded() -> Iterator[tuple[Config, str, str, list[str]]]:
+def seeded(framework_page: str) -> Iterator[tuple[Config, str, str, list[str]]]:
     """Two annotations in creation order in the configured group, each carrying a distinct
-    recoverable math quote, tagged with a per-run unique marker for isolation; hard-deleted
-    from Postgres afterward."""
+    recoverable math quote on the test-served fixture page, tagged with a per-run unique
+    marker for isolation; hard-deleted from Postgres afterward."""
     cfg = Config.load()
     tag = f"__annotate_it_{uuid.uuid4().hex}"
-    id1 = _seed(cfg, "first note", [tag], EXACT_1)
-    id2 = _seed(cfg, "second note", [tag], EXACT_2)
-    yield cfg, tag, FRAMEWORK_URL, [id1, id2]
+    id1 = _seed(cfg, "first note", [tag], EXACT_1, framework_page)
+    id2 = _seed(cfg, "second note", [tag], EXACT_2, framework_page)
+    yield cfg, tag, framework_page, [id1, id2]
     with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM annotation WHERE tags @> ARRAY[%s]::text[]", (tag,))
         conn.commit()
@@ -166,7 +167,7 @@ def test_an_empty_value_in_the_real_normalized_column_is_refused_like_a_missing_
 
 
 @pytest.fixture
-def seeded_with_prose_context() -> Iterator[tuple[Config, str]]:
+def seeded_with_prose_context(framework_page: str) -> Iterator[tuple[Config, str]]:
     """One annotation whose TextQuoteSelector carries prefix/suffix prose anchors alongside the
     recoverable exact — the surrounding context h stores for anchoring. Hard-deleted afterward."""
     cfg = Config.load()
@@ -176,6 +177,7 @@ def seeded_with_prose_context() -> Iterator[tuple[Config, str]]:
         "context note",
         [tag],
         EXACT_1,
+        framework_page,
         prefix="For classifiers ",
         suffix=" is the pullback",
     )

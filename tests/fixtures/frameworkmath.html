@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Framework (Pandoc/Quarto) math quote render test</title>
+  </head>
+  <body style="font: 18px/1.7 Georgia, serif; max-width: 42em; margin: 3em auto">
+    <h1>Pandoc/Quarto math quote render test</h1>
+    <p>Select part of the definition below, including a formula, and save the annotation.
+      Two different values come out of that. The browser's capture goes into the annotation's
+      <code>TextQuoteSelector</code> and is used only for anchoring; this fixture loads no
+      MathJax, so that capture is the literal <code>\(…\)</code> markup you see below, where
+      on the published Pandoc document it would be the flattened rendering
+      <code>ιA:C.A→C&nbsp;…</code>. Separately, at intake, h's normalization service fetches
+      this page server-side, extracts the authored TeX from its
+      <code>&lt;span class="math"&gt;</code> markup, and stores it as the annotation's
+      <code>normalized_quote</code> (<code>method='html'</code>). The sidebar displays that
+      stored value and nothing else: it does no reconstruction, recovery, or OCR of its own
+      when the annotation is shown, and it never reads the selector of a saved annotation.</p>
+
+    <p><strong>What to look for.</strong> The sidebar quote should <em>typeset</em> the
+      formulas that appear below only as <code>\(…\)</code> source — a subscripted
+      <code>ι_A</code> and a script <code>𝒞</code> — sitting inline within the sentence
+      rather than each breaking onto its own line.</p>
+
+    <!-- Real pandoc source, verbatim from the published framework doc. The math is authored as
+         <span class="math inline">\(TeX\)</span> / <span class="math display">\[TeX\]</span>. -->
+    <p><span class="theorem-title"><strong>Definition 2.4 (Intersection of classifiers)</strong></span> For classifiers <span class="math inline">\(\iota_A \colon \mathcal C.A \to \mathcal C\)</span> and <span class="math inline">\(\iota_B \colon \mathcal C.B \to \mathcal C\)</span> their intersection is the pullback in <span class="math inline">\(\mathbf{Cat}\)</span> <span class="math display">\[
+\mathcal C.A \times_{\mathcal C} \mathcal C.B \longrightarrow \mathcal C,
+\]</span> the category of objects carrying both structures compatibly. It is again a classifier. Iterating gives the intersection of any finite family.</p>
+  </body>
+</html>
