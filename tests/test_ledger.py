@@ -59,6 +59,16 @@ def test_append_rejects_a_second_drain_of_the_same_annotation(tmp_path: pathlib.
     assert entry.remediation == "First remediation."
 
 
+def test_duplicate_check_reads_only_the_ledger_id(tmp_path: pathlib.Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text('{"id":"a1"}\n')
+
+    append([_ann("a2")], ledger, {"a2": "Applied the requested correction."})
+
+    with pytest.raises(ValueError):
+        append([_ann("a1")], ledger, {"a1": "Applied the requested correction."})
+
+
 def test_resolve_keeps_path_inside_repo_and_rejects_escape(tmp_path: pathlib.Path) -> None:
     root = tmp_path / "repo"
     root.mkdir()

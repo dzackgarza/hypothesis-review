@@ -14,6 +14,7 @@ while the repo is mid-edit.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import subprocess
 
@@ -53,7 +54,7 @@ def _recorded_ids(ledger_path: pathlib.Path) -> set[str]:
     if not ledger_path.exists():
         return set()
     with ledger_path.open(encoding="utf-8") as lines:
-        return {LedgerEntry.from_json(line).id for line in lines if line.strip()}
+        return {json.loads(line)["id"] for line in lines if line.strip()}
 
 
 def append(
