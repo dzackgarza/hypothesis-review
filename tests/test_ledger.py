@@ -1,7 +1,7 @@
 """Ledger: append web feedback to a git-tracked JSONL file in the ambient repo.
 
-``append`` dedups by annotation id, so the ledger is the complete, non-duplicated record
-of every note handed to an agent. No deploy-log or version anchoring: the ledger is
+``append`` rejects a second drain of the same annotation, so each ledger row carries one
+unambiguous remediation. No deploy-log or version anchoring: the ledger is
 committed, so git's own history places each entry next to the code state it landed
 against. ``track`` is exercised against a throwaway repo with an always-failing hook,
 proving it commits the ledger alone (feedback is data, not code, and must record while the
@@ -34,29 +34,29 @@ def _ann(id: str, text: str = "note", target: object = None) -> Annotation:
 
 def test_append_writes_one_jsonl_line_per_new_annotation(tmp_path: pathlib.Path) -> None:
     ledger = tmp_path / "feedback" / "ledger.jsonl"  # parent created on demand
-    new = append([_ann("a1", "fix typo"), _ann("a2", "add ref")], ledger)
+    new = append(
+        [_ann("a1", "fix typo"), _ann("a2", "add ref")],
+        ledger,
+        {"a1": "Corrected the typo.", "a2": "Added the missing reference."},
+    )
 
     assert [e.id for e in new] == ["a1", "a2"]
     lines = ledger.read_text().splitlines()
     assert [LedgerEntry.from_json(line).text for line in lines] == ["fix typo", "add ref"]
+    assert [LedgerEntry.from_json(line).remediation for line in lines] == [
+        "Corrected the typo.",
+        "Added the missing reference.",
+    ]
 
 
-def test_append_dedups_by_id_across_calls(tmp_path: pathlib.Path) -> None:
+def test_append_rejects_a_second_drain_of_the_same_annotation(tmp_path: pathlib.Path) -> None:
     ledger = tmp_path / "ledger.jsonl"
-    append([_ann("a1"), _ann("a2")], ledger)
-    again = append([_ann("a1"), _ann("a3")], ledger)  # a1 already recorded
+    append([_ann("a1")], ledger, {"a1": "First remediation."})
 
-    assert [e.id for e in again] == ["a3"]  # only the genuinely new one is returned
-    ids = [LedgerEntry.from_json(line).id for line in ledger.read_text().splitlines()]
-    assert ids == ["a1", "a2", "a3"]  # a1 not duplicated
-
-
-def test_append_nothing_new_leaves_the_file_untouched(tmp_path: pathlib.Path) -> None:
-    ledger = tmp_path / "ledger.jsonl"
-    append([_ann("a1")], ledger)
-    before = ledger.read_text()
-    assert append([_ann("a1")], ledger) == []  # all ids already present
-    assert ledger.read_text() == before  # no rewrite, so nothing to commit
+    with pytest.raises(ValueError):
+        append([_ann("a1")], ledger, {"a1": "Second remediation."})
+    [entry] = [LedgerEntry.from_json(line) for line in ledger.read_text().splitlines()]
+    assert entry.remediation == "First remediation."
 
 
 def test_resolve_keeps_path_inside_repo_and_rejects_escape(tmp_path: pathlib.Path) -> None:
@@ -116,7 +116,7 @@ def _committed_files(repo: pathlib.Path) -> str:
 def test_track_commits_only_the_ledger_and_bypasses_the_hook(tmp_path: pathlib.Path) -> None:
     repo = _init_repo(tmp_path)
     ledger = repo / "feedback" / "ledger.jsonl"
-    append([_ann("a1")], ledger)
+    append([_ann("a1")], ledger, {"a1": "Applied the requested correction."})
     (repo / "wip.txt").write_text("unrelated in-progress work")  # must stay uncommitted
 
     track(ledger, "feedback: 1 annotation")  # fails here unless it uses --no-verify

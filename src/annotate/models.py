@@ -1,11 +1,4 @@
-"""annotate data models.
-
-A review batch is just a ``list[Annotation]`` -- the real annotations created since a
-session's open timestamp (see :func:`annotate.session.batch_since`). :meth:`Annotation.is_marker`
-still recognizes the ``acted`` tag (and any leftover legacy session-marker rows). A
-:class:`LedgerEntry` is one git-anchored, JSON-serializable line of the reviewed repo's JSONL
-ledger.
-"""
+"""Annotation and remediation-ledger data models."""
 
 from __future__ import annotations
 
@@ -84,9 +77,6 @@ class Annotation:
     page_index: int | None = None
     normalization_error: str | None = None
 
-    def is_marker(self, kind: str) -> bool:
-        return kind in self.tags
-
     @classmethod
     def from_pg_row(cls, row: dict[str, Any]) -> Annotation:
         """Map an ``annotation`` table row to the h API annotation shape.
@@ -137,6 +127,7 @@ class LedgerEntry:
     tags: list[str]
     target: Any
     quote: str
+    remediation: str
 
     def to_json(self) -> str:
         return json.dumps(dataclasses.asdict(self))

@@ -1,10 +1,9 @@
-"""Append web feedback to a git-tracked JSONL ledger in the ambient repo.
+"""Append drained feedback to a git-tracked JSONL ledger in the ambient repo.
 
-Every batch an agent receives is recorded here — recording is not optional, it is how the
-tool forces feedback to stay auditable alongside the work. The ledger is a JSONL file at a
-repo-relative path (default :data:`DEFAULT_LEDGER`, or an agent-named per-workflow file);
-:func:`append` dedups by annotation id, so it is the complete, non-duplicated record of
-every note handed to an agent.
+Every queue item an agent drains is recorded with its remediation explanation. The
+ledger is a JSONL file at a repo-relative path (default :data:`DEFAULT_LEDGER`, or an
+agent-named per-workflow file). A repeated annotation id is rejected rather than silently
+discarding a second explanation.
 
 There is no deploy-log or version anchoring: the ledger is committed, so git's own history
 places each entry next to the code state it landed against, and an agent cross-references
@@ -57,11 +56,21 @@ def _recorded_ids(ledger_path: pathlib.Path) -> set[str]:
         return {LedgerEntry.from_json(line).id for line in lines if line.strip()}
 
 
-def append(annotations: list[Annotation], ledger_path: pathlib.Path) -> list[LedgerEntry]:
-    """Append one JSONL line per annotation whose id is not already recorded; return the
-    newly written entries (``[]`` if every id was already present, so there is nothing to
-    commit). ``created`` is stringified so the entry stays JSON-serializable."""
+def append(
+    annotations: list[Annotation],
+    ledger_path: pathlib.Path,
+    remediations: dict[str, str],
+) -> list[LedgerEntry]:
+    """Append one remediated JSONL line per annotation.
+
+    ``created`` is stringified so the entry stays JSON-serializable. An annotation already
+    present in the ledger is an error because accepting it would make two remediation
+    explanations compete for ownership of the same queue item.
+    """
     seen = _recorded_ids(ledger_path)
+    duplicate_ids = [ann.id for ann in annotations if ann.id in seen]
+    if duplicate_ids:
+        raise ValueError(f"annotation(s) already drained into this ledger: {', '.join(duplicate_ids)}")
     entries = [
         LedgerEntry(
             id=ann.id,
@@ -71,9 +80,9 @@ def append(annotations: list[Annotation], ledger_path: pathlib.Path) -> list[Led
             tags=list(ann.tags),
             target=ann.target,
             quote=ann.quote,
+            remediation=remediations[ann.id],
         )
         for ann in annotations
-        if ann.id not in seen
     ]
     if not entries:
         return []

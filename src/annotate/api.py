@@ -1,7 +1,8 @@
-"""h HTTP API client for writes (``acted`` tagging).
+"""h HTTP API client for annotation-tag transitions.
 
-Reads go through Postgres (``source.py``); only writes use the h HTTP API with a
-developer token. The one write is merging the ``acted`` tag onto a resolved annotation.
+Reads go through Postgres (``source.py``); writes use the h HTTP API with a
+developer token. A drain replaces the ephemeral queue tag with ``acted`` while
+preserving every unrelated annotation tag.
 """
 
 from __future__ import annotations
@@ -34,7 +35,13 @@ class HClient:
             transport=transport,
         )
 
-    def tag(self, annotation_id: str, add: list[str]) -> None:
+    def transition_tags(
+        self,
+        annotation_id: str,
+        *,
+        remove: list[str],
+        add: list[str],
+    ) -> None:
         # h PATCH replaces the tags field, so merge against the current tags. The current
         # tags must actually be present and well-formed: coercing a malformed response to
         # [] would make the PATCH wipe the annotation's existing tags.
@@ -44,18 +51,12 @@ class HClient:
         if not isinstance(existing, list) or not all(isinstance(t, str) for t in existing):
             msg = f"annotation {annotation_id}: response `tags` is {existing!r}, not a list of strings; refusing to PATCH a merge built from a malformed response"
             raise ResponseContractError(msg)
-        merged = list(dict.fromkeys([*existing, *add]))
-        resp = self._client.patch(f"/api/annotations/{annotation_id}", json={"tags": merged})
-        resp.raise_for_status()
-
-    def delete(self, annotation_id: str) -> None:
-        """Remove an annotation from h, draining it out of the reader's sidebar.
-
-        Only ever called after the batch is durably in the ledger: that file then holds
-        the sole copy of the quote, its selectors and the recovered LaTeX, which is what
-        makes removing the original safe rather than destructive.
-        """
-        resp = self._client.delete(f"/api/annotations/{annotation_id}")
+        retained = [tag for tag in existing if tag not in remove]
+        updated = list(dict.fromkeys([*retained, *add]))
+        resp = self._client.patch(
+            f"/api/annotations/{annotation_id}",
+            json={"tags": updated},
+        )
         resp.raise_for_status()
 
     def close(self) -> None:

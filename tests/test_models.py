@@ -17,8 +17,9 @@ def test_ledger_entry_json_round_trip() -> None:
         created="2026-07-18T10:00:00",
         uri="http://localhost/paper.html",
         text="needs a citation",
-        tags=["review:open"],
+        tags=["agent:queue"],
         target=[{"source": "http://localhost/paper.html", "selector": []}],
         quote="Let $f(x,y)$ be a polynomial",
+        remediation="Added the missing citation.",
     )
     assert LedgerEntry.from_json(entry.to_json()) == entry

@@ -1,10 +1,7 @@
-"""The whole of Send to agent, over the real stack, with nothing stubbed.
+"""The queue and drain workflow over the real stack, with nothing substituted.
 
-Every other test of the delivery path swaps in a stub source: they prove the CLI records
-what it is handed. This one proves what a reader is actually handed. A session is opened
-in a real repo, annotations are created through the live h API exactly as the browser
-extension creates them -- over a page served here, so the backend really fetches and reads
-it -- and ``annotate pull`` then runs for real, against real Postgres and real git.
+Annotations are created through the live h API, read through real Postgres, drained
+through the CLI, written to a real git ledger, and reread from both persistence surfaces.
 
 What it holds the loop to is the reason the loop exists: the agent receives the
 mathematics the reader highlighted, as the TeX its author wrote, and never the flattened
@@ -13,8 +10,7 @@ spends their day on -- MathJax typesetting delimited TeX written straight into t
 which is what Stack Exchange, MathOverflow and most course pages serve.
 
 These need the live h stack (API + Postgres). It is the tool's real boundary: without it
-the tool cannot function, so they fail loudly rather than skip, and they are collected
-only under ``ANNOTATE_PG_IT=1`` (see ``tests/conftest.py``).
+the tool cannot function, so they fail loudly rather than skip.
 """
 
 from __future__ import annotations
@@ -33,9 +29,9 @@ import pytest
 from click.testing import CliRunner
 
 from annotate.api import HClient
-from annotate.cli import App, _now, main
+from annotate.cli import AGENT_QUEUE, App, main
 from annotate.config import Config
-from annotate.session import write_open_time
+from annotate.models import _public_id
 from annotate.source import PostgresSource
 
 #: A page of the shape the mathematical web serves: the author's TeX between dollars in
@@ -60,53 +56,92 @@ AUTHORED = r"An Enriques surface satisfies $2K_Z \sim 0$ and $q(Z) = 0$, so it s
 
 
 @pytest.mark.pg
-def test_the_agent_receives_the_mathematics_the_reader_highlighted(git_repo: Path, served_page: str, tagged: str) -> None:
+def test_the_agent_sees_only_the_active_queue(git_repo: Path, served_page: str, tagged: str) -> None:
     cfg = Config.load()
-    write_open_time(git_repo, _now())  # the session the browser opens, on h's clock
-    _annotate(cfg, served_page, tagged, "this is the definition I meant")
+    queued_id = _annotate(
+        cfg,
+        served_page,
+        tagged,
+        "this is the definition I meant",
+        extra_tags=[AGENT_QUEUE],
+    )
+    _annotate(cfg, served_page, tagged, "not queued")
 
-    result = CliRunner().invoke(main, ["pull"], obj=_live_app(cfg))
+    result = CliRunner().invoke(main, ["queue"], obj=_live_app(cfg))
 
     assert result.exit_code == 0, result.output
-    [delivered] = [a for a in json.loads(result.stdout) if tagged in a["tags"]]
+    [delivered] = json.loads(result.stdout)
+    assert delivered["id"] == queued_id
     assert delivered["quote"] == AUTHORED
     assert delivered["text"] == "this is the definition I meant"
-    # The ledger the agent's work is anchored to holds the same thing, committed.
-    [recorded] = [json.loads(line) for line in (git_repo / "feedback" / "ledger.jsonl").read_text().splitlines() if json.loads(line)["id"] == delivered["id"]]
-    assert recorded["quote"] == AUTHORED
 
 
 @pytest.mark.pg
-def test_the_agent_never_receives_the_browser_s_flattened_capture(git_repo: Path, served_page: str, tagged: str) -> None:
-    # The failure this whole path exists to prevent: an agent acting on "2KZ∼0", which is
-    # not mathematics anyone can read, act on, or paste back into a document.
+def test_drain_records_each_remediation_then_removes_only_the_queue_flag(
+    git_repo: Path,
+    served_page: str,
+    tagged: str,
+) -> None:
     cfg = Config.load()
-    write_open_time(git_repo, _now())
-    _annotate(cfg, served_page, tagged, "note")
+    first_id = _annotate(
+        cfg,
+        served_page,
+        tagged,
+        "first",
+        extra_tags=[AGENT_QUEUE, "paper"],
+    )
+    second_id = _annotate(
+        cfg,
+        served_page,
+        tagged,
+        "second",
+        exact="Its universal cover is a K3 surface X",
+        extra_tags=[AGENT_QUEUE],
+    )
 
-    result = CliRunner().invoke(main, ["pull"], obj=_live_app(cfg))
+    result = CliRunner().invoke(
+        main,
+        [
+            "drain",
+            "--item",
+            first_id,
+            "Corrected the canonical divisor formula.",
+            "--item",
+            second_id,
+            "Added the missing covering involution argument.",
+        ],
+        obj=_live_app(cfg),
+    )
 
-    [delivered] = [a for a in json.loads(result.stdout) if tagged in a["tags"]]
-    assert delivered["quote"] != CAPTURED
-    assert "2KZ∼0" not in delivered["quote"]
+    assert result.exit_code == 0, result.output
+    recorded = [json.loads(line) for line in (git_repo / "feedback" / "ledger.jsonl").read_text().splitlines()]
+    assert [(entry["id"], entry["remediation"]) for entry in recorded] == [
+        (first_id, "Corrected the canonical divisor formula."),
+        (second_id, "Added the missing covering involution argument."),
+    ]
+    rows = _annotation_tags(cfg, tagged)
+    assert rows[first_id] == {tagged, "paper", "acted"}
+    assert rows[second_id] == {tagged, "acted"}
 
 
 @pytest.mark.pg
-def test_a_whole_session_of_notes_arrives_as_one_batch(git_repo: Path, served_page: str, tagged: str) -> None:
-    # A reader works through a page and presses Send to agent once: everything they wrote
-    # during the session arrives together, in the order they wrote it, each with its own
-    # recovered quote.
+def test_drain_rejects_a_nonqueued_item_before_recording_or_tagging(
+    git_repo: Path,
+    served_page: str,
+    tagged: str,
+) -> None:
     cfg = Config.load()
-    write_open_time(git_repo, _now())
-    _annotate(cfg, served_page, tagged, "first", exact=CAPTURED)
-    _annotate(cfg, served_page, tagged, "second", exact="Its universal cover is a K3 surface X")
+    annotation_id = _annotate(cfg, served_page, tagged, "not queued")
 
-    result = CliRunner().invoke(main, ["pull"], obj=_live_app(cfg))
+    result = CliRunner().invoke(
+        main,
+        ["drain", "--item", annotation_id, "Should not be accepted."],
+        obj=_live_app(cfg),
+    )
 
-    batch = [a for a in json.loads(result.stdout) if tagged in a["tags"]]
-    assert [a["text"] for a in batch] == ["first", "second"]
-    assert batch[0]["quote"] == AUTHORED
-    assert batch[1]["quote"] == r"Its universal cover is a K3 surface $X$"
+    assert result.exit_code != 0
+    assert not (git_repo / "feedback" / "ledger.jsonl").exists()
+    assert _annotation_tags(cfg, tagged)[annotation_id] == {tagged}
 
 
 def _live_app(cfg: Config) -> App:
@@ -119,7 +154,14 @@ def _live_app(cfg: Config) -> App:
     )
 
 
-def _annotate(cfg: Config, page: str, tag: str, text: str, exact: str = CAPTURED) -> str:
+def _annotate(
+    cfg: Config,
+    page: str,
+    tag: str,
+    text: str,
+    exact: str = CAPTURED,
+    extra_tags: list[str] | None = None,
+) -> str:
     """Create one annotation through the live h API, as the browser extension does."""
     response = httpx.post(
         f"{cfg.api_url}/api/annotations",
@@ -127,7 +169,7 @@ def _annotate(cfg: Config, page: str, tag: str, text: str, exact: str = CAPTURED
         json={
             "uri": page,
             "text": text,
-            "tags": [tag],
+            "tags": [tag, *(extra_tags or [])],
             "group": cfg.group_id,
             "target": [
                 {
@@ -141,6 +183,17 @@ def _annotate(cfg: Config, page: str, tag: str, text: str, exact: str = CAPTURED
     response.raise_for_status()
     identifier: Any = response.json()["id"]
     return str(identifier)
+
+
+def _annotation_tags(cfg: Config, run_tag: str) -> dict[str, set[str]]:
+    """Public annotation ids and tags for this run, read from the owned database boundary."""
+    with psycopg.connect(cfg.pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, tags FROM annotation WHERE tags @> ARRAY[%s]::text[] AND deleted = false",
+            (run_tag,),
+        )
+        rows = cur.fetchall()
+    return {_public_id(identifier): set(tags) for identifier, tags in rows}
 
 
 @pytest.fixture
