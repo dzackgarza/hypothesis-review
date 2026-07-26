@@ -77,7 +77,7 @@ def test_the_agent_sees_only_the_active_queue(git_repo: Path, served_page: str, 
 
 
 @pytest.mark.pg
-def test_drain_records_each_remediation_then_removes_only_the_queue_flag(
+def test_drain_records_each_remediation_then_deletes_each_annotation(
     git_repo: Path,
     served_page: str,
     tagged: str,
@@ -120,8 +120,8 @@ def test_drain_records_each_remediation_then_removes_only_the_queue_flag(
         (second_id, "Added the missing covering involution argument."),
     ]
     rows = _annotation_tags(cfg, tagged)
-    assert rows[first_id] == {tagged, "paper", "acted"}
-    assert rows[second_id] == {tagged, "acted"}
+    assert first_id not in rows
+    assert second_id not in rows
 
 
 @pytest.mark.pg

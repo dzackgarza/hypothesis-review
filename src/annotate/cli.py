@@ -26,7 +26,6 @@ from annotate.source import AnnotationSource, PostgresSource
 #: deliberately visible in the ordinary tag UI: the queue must never be hidden
 #: behind extension-only state.
 AGENT_QUEUE = "agent:queue"
-ACTED = "acted"
 
 
 @dataclasses.dataclass
@@ -47,8 +46,8 @@ def _anns_json(annotations: list[Annotation]) -> str:
 
 
 def _active_queue(app: App) -> list[Annotation]:
-    """Queued, not-yet-acted annotations in creation order."""
-    return [annotation for annotation in app.source.list(app.group_id) if AGENT_QUEUE in annotation.tags and ACTED not in annotation.tags]
+    """Queued annotations in creation order."""
+    return [annotation for annotation in app.source.list(app.group_id) if AGENT_QUEUE in annotation.tags]
 
 
 def _require_repo() -> pathlib.Path:
@@ -79,7 +78,7 @@ def _drain(
     rel_path: str | None,
     items: tuple[tuple[str, str], ...],
 ) -> list[LedgerEntry]:
-    """Record the whole requested batch before changing any queue flags."""
+    """Commit the whole requested batch to the ledger, then delete it from h."""
     root = _require_repo()
     queue_by_id = {annotation.id: annotation for annotation in _active_queue(app)}
     requested_ids = [annotation_id for annotation_id, _ in items]
@@ -105,11 +104,7 @@ def _drain(
         f"feedback: drain {len(entries)} annotation(s) into {ledger_path.relative_to(root)}",
     )
     for annotation in selected:
-        app.client.transition_tags(
-            annotation.id,
-            remove=[AGENT_QUEUE],
-            add=[ACTED],
-        )
+        app.client.delete(annotation.id)
     return entries
 
 

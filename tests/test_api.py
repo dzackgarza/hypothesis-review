@@ -1,7 +1,7 @@
 """Real-boundary tests for :class:`HClient`.
 
-HClient's one job is to talk to the live h API correctly: merge the ``acted`` tag onto a
-resolved annotation. A mocked transport accepts any request, so it cannot catch a wrong
+HClient's one job is to talk to the live h API correctly: delete a resolved annotation.
+A mocked transport accepts any request, so it cannot catch a wrong
 endpoint, a malformed body, or a bad id format -- which is exactly how the uuid-vs-public-id
 bug reached the tag path. This drives the live API and reads the result back through
 Postgres, then cleans up. It requires the live h stack (the tool's real boundary), so its
@@ -80,18 +80,10 @@ def run(framework_page: str) -> Iterator[tuple[Config, str, str]]:
 
 
 @pytest.mark.pg
-def test_transition_tags_replaces_queue_with_acted_and_preserves_other_tags(run: Any) -> None:
+def test_delete_removes_annotation(run: Any) -> None:
     cfg, tag, page_url = run
     api_id = _seed(cfg, [tag, "paperA", "agent:queue"], page_url)
 
-    HClient(cfg.api_url, cfg.token).transition_tags(
-        api_id,
-        remove=["agent:queue"],
-        add=["acted", "paperA"],
-    )
+    HClient(cfg.api_url, cfg.token).delete(api_id)
 
-    rows = _rows_for_tag(cfg.pg_dsn, tag)
-    assert len(rows) == 1
-    tags = rows[0]["tags"]
-    assert set(tags) == {tag, "paperA", "acted"}  # acted added; nothing dropped
-    assert len(tags) == len(set(tags))  # paperA merged, not duplicated
+    assert _rows_for_tag(cfg.pg_dsn, tag) == []
