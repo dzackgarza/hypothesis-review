@@ -7,7 +7,8 @@ parks that timestamp, then serves the loopback session-close endpoint until the 
 posts to it. The ``wait`` tests drive that endpoint for real -- ``--port`` puts the served
 socket under the test's control, so the wake, the timeout, and the never-served case are
 observed at the real boundary rather than through a substituted ``_park``. Source and client
-are stubbed via ``ctx.obj``.
+are stubbed via ``ctx.obj``. The wait tests park open=now(), so PAST predates
+any real clock and FUTURE follows it.
 """
 
 import json
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from conftest import close_the_session, committed_at_head, free_port
+from conftest import StubClient, close_the_session, committed_at_head, free_port
 
 from annotate.api import HClient
 from annotate.cli import App, main
@@ -58,28 +59,17 @@ class _StubSource:
         return sorted(rows, key=lambda a: a.created)
 
 
-class _StubClient(HClient):
-    """A do-nothing client: pull/wait never write to h."""
-
-    def __init__(self) -> None:
-        self.tagged: list[tuple[str, list[str]]] = []
-
-    def tag(self, annotation_id: str, add: list[str]) -> None:
-        self.tagged.append((annotation_id, list(add)))
-
-
 OPEN_TIME = datetime(2026, 7, 20, 12, 0, 0)
-BEFORE = _ann("before", datetime(2026, 7, 20, 11, 0, 0))  # created before the session opened
+BEFORE = _ann("before", datetime(2026, 7, 20, 11, 0, 0))
 A = _ann("a", datetime(2026, 7, 20, 12, 0, 1))
 B = _ann("b", datetime(2026, 7, 20, 12, 0, 2))
-# For the wait tests, which park open=now(): PAST is before any real clock, FUTURE after it.
 PAST = _ann("before", datetime(2000, 1, 1, 0, 0, 0))
 FUTURE_A = _ann("a", datetime(2099, 1, 1, 0, 0, 1))
 FUTURE_B = _ann("b", datetime(2099, 1, 1, 0, 0, 2))
 
 
-def _app(anns: list[Annotation], client: HClient | None = None) -> App:
-    return App(source=_StubSource(anns), client=client or _StubClient(), group_id="grp")
+def _app(anns: list[Annotation], client: HClient) -> App:
+    return App(source=_StubSource(anns), client=client, group_id="grp")
 
 
 def _ledger_ids(repo: Path) -> list[str]:
@@ -87,18 +77,18 @@ def _ledger_ids(repo: Path) -> list[str]:
     return [json.loads(line)["id"] for line in p.read_text().splitlines()] if p.exists() else []
 
 
-def test_pull_records_and_prints_batch(git_repo: Path) -> None:
+def test_pull_records_and_prints_batch(stub_client: StubClient, git_repo: Path) -> None:
     write_open_time(git_repo, OPEN_TIME)
-    result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
+    result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE, A, B], client=stub_client))
     assert result.exit_code == 0, result.output
-    assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]  # only the post-open ones
-    assert _ledger_ids(git_repo) == ["a", "b"]  # recorded to the default ledger
-    assert "feedback/ledger.jsonl" in committed_at_head(git_repo)  # committed
-    assert "recorded 2 new" in result.stderr  # audit log to stderr
+    assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]
+    assert _ledger_ids(git_repo) == ["a", "b"]
+    assert "feedback/ledger.jsonl" in committed_at_head(git_repo)
+    assert "recorded 2 new" in result.stderr
     assert "default ledger" in result.stderr
 
 
-def test_pull_rejects_a_highlight_without_backend_normalization(git_repo: Path) -> None:
+def test_pull_rejects_a_highlight_without_backend_normalization(stub_client: StubClient, git_repo: Path) -> None:
     write_open_time(git_repo, OPEN_TIME)
     missing = Annotation(
         id="missing",
@@ -111,7 +101,7 @@ def test_pull_rejects_a_highlight_without_backend_normalization(git_repo: Path) 
         normalization_error="h has no normalized quote; diagnostic abc-123",
     )
 
-    result = CliRunner().invoke(main, ["pull"], obj=_app([missing]))
+    result = CliRunner().invoke(main, ["pull"], obj=_app([missing], client=stub_client))
 
     assert result.exit_code != 0
     assert "cannot deliver unnormalized annotation" in result.stderr
@@ -119,63 +109,67 @@ def test_pull_rejects_a_highlight_without_backend_normalization(git_repo: Path) 
     assert _ledger_ids(git_repo) == []
 
 
-def test_pull_bounces_when_not_in_a_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)  # a bare dir, not a git repo
-    result = CliRunner().invoke(main, ["pull"], obj=_app([A, B]))
+def test_pull_bounces_when_not_in_a_git_repo(stub_client: StubClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["pull"], obj=_app([A, B], client=stub_client))
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr
 
 
-def test_pull_dedups_on_a_second_call(git_repo: Path) -> None:
+def test_pull_dedups_on_a_second_call(stub_client: StubClient, git_repo: Path) -> None:
     write_open_time(git_repo, OPEN_TIME)
     runner = CliRunner()
-    runner.invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
+    runner.invoke(main, ["pull"], obj=_app([BEFORE, A, B], client=stub_client))
     head_after_first = committed_at_head(git_repo)
-    result = runner.invoke(main, ["pull"], obj=_app([BEFORE, A, B]))
+    result = runner.invoke(main, ["pull"], obj=_app([BEFORE, A, B], client=stub_client))
     assert result.exit_code == 0, result.output
-    assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]  # still delivered
-    assert _ledger_ids(git_repo) == ["a", "b"]  # not duplicated
-    assert "recorded 0 new" in result.stderr  # nothing new to commit
-    assert committed_at_head(git_repo) == head_after_first  # no second commit
+    assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]
+    assert _ledger_ids(git_repo) == ["a", "b"]
+    assert "recorded 0 new" in result.stderr
+    assert committed_at_head(git_repo) == head_after_first
 
 
-def test_pull_records_to_named_path(git_repo: Path) -> None:
+def test_pull_records_to_named_path(stub_client: StubClient, git_repo: Path) -> None:
     write_open_time(git_repo, OPEN_TIME)
-    result = CliRunner().invoke(main, ["pull", "--path", "research-intake.jsonl"], obj=_app([A, B]))
+    result = CliRunner().invoke(main, ["pull", "--path", "research-intake.jsonl"], obj=_app([A, B], client=stub_client))
     assert result.exit_code == 0, result.output
     assert (git_repo / "research-intake.jsonl").exists()
     assert "research-intake.jsonl" in committed_at_head(git_repo)
-    assert "default ledger" not in result.stderr  # a name was supplied
+    assert "default ledger" not in result.stderr
 
 
-def test_pull_without_an_open_session_exits_nonzero(git_repo: Path) -> None:
-    # hypothesis-review#7: a missing session is an error, not an empty successful batch.
-    # An agent that runs `pull` before any session opened must learn that, not read `[]`
-    # as "the reviewer sent nothing".
-    result = CliRunner().invoke(main, ["pull"], obj=_app([A, B]))  # no open_time parked
+def test_pull_without_an_open_session_exits_nonzero(stub_client: StubClient, git_repo: Path) -> None:
+    """hypothesis-review#7: a missing session is an error, not an empty successful batch.
+    An agent that runs `pull` before any session opened must learn that, not read `[]`
+    as "the reviewer sent nothing".
+    """
+    result = CliRunner().invoke(main, ["pull"], obj=_app([A, B], client=stub_client))
     assert result.exit_code != 0
     assert "no review session is open" in result.output
-    assert _ledger_ids(git_repo) == []  # nothing recorded for the failed delivery
+    assert _ledger_ids(git_repo) == []
 
 
 def test_pull_with_an_open_session_and_no_new_annotations_prints_an_empty_batch(
+    stub_client: StubClient,
     git_repo: Path,
 ) -> None:
-    # The empty-but-successful case stays distinguishable from the missing-session error:
-    # a session IS open, nothing was created inside it, and that is a real empty delivery.
+    """The empty-but-successful case stays distinguishable from the missing-session error:
+    a session IS open, nothing was created inside it, and that is a real empty delivery.
+    """
     write_open_time(git_repo, OPEN_TIME)
-    result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE]))
+    result = CliRunner().invoke(main, ["pull"], obj=_app([BEFORE], client=stub_client))
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
 
 
-def test_wait_delivers_the_batch_when_the_browser_closes_the_session(git_repo: Path) -> None:
-    # The wake is a real POST to the loopback session-close endpoint the command serves,
-    # so this exercises the same path the extension drives: park -> serve -> close -> deliver.
+def test_wait_delivers_the_batch_when_the_browser_closes_the_session(stub_client: StubClient, git_repo: Path) -> None:
+    """The wake is a real POST to the loopback session-close endpoint the command serves,
+    so this exercises the same path the extension drives: park -> serve -> close -> deliver.
+    """
     port = free_port()
     statuses: list[int] = []
     closer = close_the_session(port, statuses)
-    client = _StubClient()
+    client = stub_client
 
     result = CliRunner().invoke(
         main,
@@ -185,37 +179,39 @@ def test_wait_delivers_the_batch_when_the_browser_closes_the_session(git_repo: P
     closer.join(timeout=5)
 
     assert result.exit_code == 0, result.output
-    assert statuses == [204]  # the served endpoint answered the browser's close request
+    assert statuses == [204]
     assert [a["id"] for a in json.loads(result.stdout)] == ["a", "b"]
-    assert (git_repo / ".git" / "annotate" / "open_time").exists()  # open time parked locally
-    assert client.tagged == []  # wait makes no h write
-    assert _ledger_ids(git_repo) == ["a", "b"]  # batch recorded
+    assert (git_repo / ".git" / "annotate" / "open_time").exists()
+    assert client.tagged == []
+    assert _ledger_ids(git_repo) == ["a", "b"]
 
 
-def test_wait_times_out_when_the_session_is_never_closed(git_repo: Path) -> None:
-    # Nobody posts to the served endpoint: the command runs the real timeout to expiry and
-    # must deliver nothing, since an unclosed session never defined a review window.
+def test_wait_times_out_when_the_session_is_never_closed(stub_client: StubClient, git_repo: Path) -> None:
+    """Nobody posts to the served endpoint: the command runs the real timeout to expiry and
+    must deliver nothing, since an unclosed session never defined a review window.
+    """
     result = CliRunner().invoke(
         main,
         ["wait", "--timeout", "1", "--port", str(free_port())],
-        obj=_app([FUTURE_A, FUTURE_B]),
+        obj=_app([FUTURE_A, FUTURE_B], client=stub_client),
     )
     assert result.exit_code != 0
     assert "timed out" in result.stderr
-    assert _ledger_ids(git_repo) == []  # nothing delivered on timeout
+    assert _ledger_ids(git_repo) == []
 
 
-def test_wait_bounces_before_parking_outside_a_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The port is held by this test for the whole call. Reaching the parking step would
-    # therefore fail loudly on the bind -- so the repo-check message is proof that `wait`
-    # bounced before ever opening a session it could not record.
+def test_wait_bounces_before_parking_outside_a_repo(stub_client: StubClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The port is held by this test for the whole call. Reaching the parking step would
+    therefore fail loudly on the bind -- so the repo-check message is proof that `wait`
+    bounced before ever opening a session it could not record.
+    """
     monkeypatch.chdir(tmp_path)
     with socket.socket() as held:
         held.bind(("127.0.0.1", 0))
         held.listen()
         port = int(held.getsockname()[1])
-        result = CliRunner().invoke(main, ["wait", "--port", str(port)], obj=_app([FUTURE_A, FUTURE_B]))
+        result = CliRunner().invoke(main, ["wait", "--port", str(port)], obj=_app([FUTURE_A, FUTURE_B], client=stub_client))
 
     assert result.exit_code != 0
     assert "not inside a git repository" in result.stderr
-    assert not isinstance(result.exception, OSError)  # bounced on the repo check, not the bind
+    assert not isinstance(result.exception, OSError)

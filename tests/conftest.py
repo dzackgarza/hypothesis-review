@@ -3,6 +3,12 @@
 The recording commands (`pull`/`wait`/`record`) commit the ledger with ``--no-verify``,
 so they work against a plain throwaway repo; ``git_repo`` also chdirs into it, since the
 commands resolve the repo from the current working directory.
+
+Live-boundary opt-in flags are declared beside the markers in pyproject.toml.
+The pg/e2e tests drive the real self-hosted h stack (Postgres + API); a runner
+without that stack cannot execute them. They are explicitly deselected at
+collection time with a visible count, never reported as exercised. The integrated
+proof workflow runs them against the deployed stack.
 """
 
 import os
@@ -18,12 +24,37 @@ from typing import Any
 import httpx
 import pytest
 
-#: Live-boundary opt-in flags, as declared next to the markers in pyproject.toml. The
-#: pg/e2e tests drive the real self-hosted h stack (Postgres + API); a runner without
-#: that stack cannot execute them, so they are collected only when their flag is set.
-#: This is explicit collection-time deselection with a visible count -- never a skip
-#: that reports the burden as exercised. The burden is discharged on the machine that
-#: runs the stack via the integrated proof workflow.
+from annotate.api import HClient
+
+
+class StubClient(HClient):
+    """Records CLI tag writes without making requests to h."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "https://unused.invalid",
+            "test-token",
+            transport=httpx.MockTransport(self._unexpected_request),
+        )
+        self.tagged: list[tuple[str, list[str]]] = []
+
+    @staticmethod
+    def _unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"Unexpected CLI stub request: {request.method} {request.url}")
+
+    def tag(self, annotation_id: str, add: list[str]) -> None:
+        self.tagged.append((annotation_id, list(add)))
+
+
+@pytest.fixture
+def stub_client() -> Iterator[StubClient]:
+    client = StubClient()
+    try:
+        yield client
+    finally:
+        client.close()
+
+
 _OPT_IN_FLAGS = {"pg": "ANNOTATE_PG_IT", "e2e": "ANNOTATE_E2E"}
 
 
@@ -42,7 +73,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 def _git(repo: Path, *args: str) -> None:
-    # core.hooksPath=/dev/null keeps this throwaway repo off the machine-wide commit gate.
+    """core.hooksPath=/dev/null keeps this throwaway repo off the machine-wide commit gate.
+    """
     subprocess.run(
         ["git", "-c", "core.hooksPath=/dev/null", *args],
         cwd=repo,
@@ -96,9 +128,11 @@ def http_service(status: int) -> Iterator[str]:
     """
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler's dispatch name
+        def do_get(self) -> None:
             self.send_response(status)
             self.end_headers()
+
+        do_GET = do_get
 
         def log_message(self, format: str, *args: Any) -> None:
             return
